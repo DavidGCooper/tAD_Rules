@@ -1,0 +1,710 @@
+---
+title: "tAD-Rules-Designed-Library-Processing"
+author: "David Cooper"
+date: "2025-11-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(pheatmap)
+library(limma)
+library(Biobase)
+library(MASS)
+library(caret)
+library(pROC)
+library(stringr)
+library(EnvStats)
+
+```
+
+## Prepare STAR genome directory
+Fasta file for the library sequences prepared using the insert and barcode sequences (No adapter sequences). A mock GTF/GFF formatted feature file was prepared where each sequences was labeled as a chromosome, gene, and exon. The genome dictory was prepared using STAR: 
+STAR --runThreadN 6 \
+  --runMode genomeGenerate \
+  --genomeDir STARRulesLib \
+  --genomeFastaFiles RulesLibrary.fasta \
+  --genomeSAindexNbases 8 \
+  --sjdbGTFfile RulesLibgtf.tsv
+
+```{r Library fasta file}
+#Library excel file
+Sequences = read.csv("seq_table_aa_and_nuc_clean.csv")
+#Insert lengths
+dplyr::count(Sequences,nt_length)
+#Full construct lengths
+Sequences$full_length=nchar(Sequences$full_construct)
+dplyr::count(Sequences,full_length)
+#Sequences without adapters
+Sequences$NoAdapt=gsub("\\*","",paste0(Sequences$nuc_seq,Sequences$barcode))
+Sequences$NoAlength=nchar(Sequences$NoAdapt)
+dplyr::count(Sequences,NoAlength)
+#Library fasta file
+write(paste(">",Sequences$index,"\n",Sequences$NoAdapt,sep=""),"RulesLibrary.fasta")
+
+```
+
+```{r Mock GTF file}
+#Prepare dataframe with necessary columns for GTF/GFF file for 12400 sequences
+Libgtf=data.frame("X1"=rep(seq(1,12400),each=3),
+                  "X2"=rep("DC",37200),
+                  "X3"=rep(c("chromosome","gene","exon"),12400),
+                  "X4"=rep(1,37200),
+                  "X5"=rep(80,37200),
+                  "X6"=rep(".",37200),
+                  "X7"=rep("+",37200),
+                  "X8"=rep(".",37200),
+                  "X9"=rep(c("ID=","gene_id=","gene_id="),12400)
+                  )
+Libgtf$X10=paste(Libgtf$X9,as.character(Libgtf$X1),sep = "")
+Libgtf=Libgtf[,c(seq(1,8),10)]
+#Mock GTF file
+write(paste("##gff-version 3\n#"),"RulesLibgtf.tsv")
+write.table(Libgtf, file='RulesLibgtf.tsv', append=TRUE, quote=FALSE, sep='\t', col.names=FALSE, row.names=FALSE)
+
+```
+
+## Processing Using STAR
+
+Raw sequence reads processed using the script ProcessFastqSTARDCedits.sh
+Adapter sequences removed and bioreplicates separated using cutadapt. Reads quantified using STAR. For each timepoint and biorep pair, the output count file (*ReadsPerGene.out.tab) was downloaded. These files contain 4 "header" rows, or categories other than the 12400 sequences where reads might have been placed (unmapped, multimapping, noFeature, and ambiguous). These files contain 4 columns (ID, unstranded counts, 1st read strand counts, and 2nd read strand counts). All "exon features" were defined as being on the "+" strand.
+
+## Loading STAR Quantifications
+
+Data was loaded from "*ReadsPerGene.out.tab" files and the unstranded counts column from each timepoint/biorep was merged into a single table.
+
+```{r Loading STAR Quantifications, eval=FALSE}
+#Counts table
+Files=list.files("./RulesSTARprocessed/",full.names = TRUE)
+countFiles=Files[grep(".tab",Files)]
+Counts=read.table(countFiles[1],header = FALSE,col.names = c("ID","Unstranded_Counts","FirstStrand_Counts","SecondStrand_Counts"))%>%
+  dplyr::select(ID)
+for(i in countFiles){
+  Counts=cbind(Counts,dplyr::select(read.table(i,header=FALSE,
+                                               col.names = c("X1",gsub("R.*","",str_sub(i,34)),"X2","X3")),
+                                    c(gsub("R.*","",str_sub(i,34)))))
+}
+rownames(Counts)=Counts$ID
+saveRDS(Counts,"RulesSTARLibraryCounts.rds")
+#Mapping Stats
+logFiles=Files[grep(".final",Files)]
+MapPercent=vector(mode = "numeric")
+Sample=vector(mode="character")
+for(i in logFiles){
+  TempLog=read_lines(i)
+  MapPercent[match(i,logFiles)]=as.numeric(substr(gsub(".*\t","",TempLog[10]),1,5))  
+  Sample[match(i,logFiles)]=gsub("Lo.*","",str_sub(i,34))
+}
+names(MapPercent)=Sample
+PhenoData=read.csv("./PhenoData.csv",header = TRUE)
+MapPercent=MapPercent[PhenoData$Sample]
+saveRDS(MapPercent,"RulesSTARMapPercent.rds")
+
+```
+
+## Store data in an expression set
+
+```{r Format data as Expression Set}
+Sequences=read.csv("~/Home/tADs/RulesLibrary/seq_table_aa_and_nuc_clean.csv")
+PhenoData=read.csv("~/Home/tADs/RulesLibrary/PhenoData.csv",header = TRUE)
+Counts=readRDS("RulesSTARLibraryCounts.rds")
+Counts=Counts[5:12404,2:56]
+
+rownames(PhenoData)=PhenoData$Sample
+CountsEset=ExpressionSet(as.matrix(Counts[,PhenoData$Sample]),featureData = AnnotatedDataFrame(Sequences),phenoData = AnnotatedDataFrame(PhenoData),protocolData = AnnotatedDataFrame(PhenoData))
+saveRDS(CountsEset,"RulesLibESet.rds")
+
+```
+
+## Quality Control
+
+Check total counts per sample and the percentage of sequences quantified per column (inverse is the number of sequences without any counts per sample). Use heatmap to show that within-sample bioreps are similar to each other.
+
+```{r Quality Control}
+CountsEset=readRDS("RulesLibESet.rds")
+MapPercent=readRDS("RulesSTARMapPercent.rds")
+barplot(colSums(exprs(CountsEset)),las=2,main="Total Number of Counts")
+barplot(colSums(exprs(CountsEset)==0),las=2,main = "Number of Sequences without any Counts")
+boxplot(log2(exprs(CountsEset)+1),las=2,main="Distribution of Counts (Log2 Transformed)")
+pheatmap(cor(log2(exprs(CountsEset)+1)),main = "All Samples Log2 Transformed")
+barplot(MapPercent,las=2,main="Map Percent")
+hist(MapPercent,main="Map Percent")
+
+#Use exact set name in featureData to subset
+Controls=CountsEset[CountsEset@featureData@data$set=="stop-first",]
+#Controls barplots
+barplot(colSums(exprs(Controls)),las=2,main=paste("Total Number of Counts, n =",nrow(exprs(Controls))))
+barplot(colSums(exprs(Controls)==0),las=2,main = paste("Number of Sequences without any Counts, n =",nrow(exprs(Controls))))
+
+```
+
+## Data Processing
+
+For each sequence determine:
+1. How many bioreps have multiple counts at time 0? - 292 sequences do not have multiple bioreps at time 0.
+2. At what timepoint do the number of counts fall to 0?
+
+```{r Evaluate Expression Pattern per Sequence, eval=FALSE}
+Counts=readRDS("RulesSTARLibraryCounts.rds")
+AggCounts=Counts[5:12404,]
+#Add psuedocount of 0.5 to all samples
+AggCounts[,2:56]=AggCounts[,2:56]+0.5
+#Indicate bioreps with day0 counts < 5, 
+AggCounts=mutate(AggCounts,
+              include1=ifelse(LL_1_bc1 < 5, 'no', 'yes'),
+              include2=ifelse(LL_1_bc2 < 5, 'no', 'yes'),
+              include3=ifelse(LL_1_bc3 < 5, 'no', 'yes'),
+              include4=ifelse(LL_1_bc4 < 5, 'no', 'yes'),
+              include5=ifelse(LL_1_bc5 < 5, 'no', 'yes'))
+#Filter out sequences with < 2 bioreps with counts at time 0
+AggCounts$multiple_biorep='no'
+AggCounts$count=0
+for(i in 1:nrow(AggCounts)){
+  x=0
+  if(AggCounts$include1[i] == 'yes')
+    x=x+1
+  if(AggCounts$include2[i] == 'yes')
+    x=x+1
+  if(AggCounts$include3[i] == 'yes')
+    x=x+1
+  if(AggCounts$include4[i] == 'yes')
+    x=x+1
+  if(AggCounts$include5[i] == 'yes')
+    x=x+1
+  AggCounts$multiple_biorep[i]=ifelse(x > 1, 'yes', 'no')
+  AggCounts$count[i]=x
+}
+#Initiate columns for daily counts
+AggCounts$tm0=0
+AggCounts$tm12_0=0
+AggCounts$tm24_0=0
+AggCounts$tm12_150=0
+AggCounts$tm24_150=0
+AggCounts$tm48_150=0
+AggCounts$tm72_150=0
+AggCounts$tm12_200=0
+AggCounts$tm24_200=0
+AggCounts$tm48_200=0
+AggCounts$tm72_200=0
+#Add up daily counts to identify day counts drop off
+AggCounts$tm0=apply(dplyr::select(AggCounts,starts_with("LL_1_")), 1, sum)
+AggCounts$tm12_0=apply(dplyr::select(AggCounts,starts_with("LL_2_")), 1, sum)
+AggCounts$tm24_0=apply(dplyr::select(AggCounts,starts_with("LL_3_")), 1, sum)
+AggCounts$tm12_150=apply(dplyr::select(AggCounts,starts_with("LL_4_")), 1, sum)
+AggCounts$tm24_150=apply(dplyr::select(AggCounts,starts_with("LL_5_")), 1, sum)
+AggCounts$tm48_150=apply(dplyr::select(AggCounts,starts_with("LL_6_")), 1, sum)
+AggCounts$tm72_150=apply(dplyr::select(AggCounts,starts_with("LL_7_")), 1, sum)
+AggCounts$tm12_200=apply(dplyr::select(AggCounts,starts_with("LL_8_")), 1, sum)
+AggCounts$tm24_200=apply(dplyr::select(AggCounts,starts_with("LL_9_")), 1, sum)
+AggCounts$tm48_200=apply(dplyr::select(AggCounts,starts_with("LL_10_")), 1, sum)
+AggCounts$tm72_200=apply(dplyr::select(AggCounts,starts_with("LL_11_")), 1, sum)
+#Tabulate the day where counts drop off 150Aur
+AggCounts$Stop_150='tm72_150'
+for(i in 1:nrow(AggCounts)){
+  lib=AggCounts[i,] %>% dplyr::select(ends_with("_150")) %>% unlist()
+  hold=which(lib < 3) %>% names()
+  if('tm48_150' %in% hold & 'tm72_150' %in% hold){
+    AggCounts$Stop_150[i]='tm48_150'
+  }
+  if('tm24_150' %in% hold & 'tm48_150' %in% hold){
+    AggCounts$Stop_150[i]='tm24_150'
+  }
+  if('tm12_150' %in% hold & 'tm24_150' %in% hold){
+    AggCounts$Stop_150[i]='tm12_150'
+  }
+}
+#Tabulate the day where counts drop off 200Aur
+AggCounts$Stop_200='tm72_200'
+for(i in 1:nrow(AggCounts)){
+  lib=AggCounts[i,] %>% dplyr::select(ends_with("_200")) %>% unlist()
+  hold=which(lib < 3) %>% names()
+  if('tm48_200' %in% hold & 'tm72_200' %in% hold){
+    AggCounts$Stop_200[i]='tm48_200'
+  }
+  if('tm24_200' %in% hold & 'tm48_200' %in% hold){
+    AggCounts$Stop_200[i]='tm24_200'
+  }
+  if('tm12_200' %in% hold & 'tm24_200' %in% hold){
+    AggCounts$Stop_200[i]='tm12_200'
+  }
+}
+
+table(AggCounts$Stop_150)
+table(AggCounts$Stop_200)
+
+saveRDS(AggCounts,"RulesSTARPartProcessedCounts.rds")
+
+```
+
+```{r Exploratory Graphs I}
+AggCounts=readRDS("RulesSTARPartProcessedCounts.rds")
+#All sequences
+boxplot(log2(AggCounts[,c(64,67:74)]),main="All Samples n=12400",las=2)
+
+```
+
+## Normalization and Linear Regression
+
+Prepare a new expression set with counts per million for each sample. Add previously calculated feature data to the expression set. Normalize to the average T0 count for each sample. Use biorep and timepoint to calculate linear regression slopes for each sample over all time ranges starting at T0. Save the slopes, intercepts, and residuals as feature data for each sequence.
+
+```{r Normalization and Linear Regression, eval=FALSE}
+CountsEset=readRDS("RulesLibESet.rds")
+NormCountsEset=CountsEset
+#Divide by total counts per replicate
+exprs(NormCountsEset)=log2((t(t(exprs(CountsEset))/colSums(exprs(CountsEset)))*1000000)+0.1) 
+boxplot(exprs(NormCountsEset),las=2,main="Distribution of Normalized Counts (Log2 Transformed)")
+#Add feature data for number of bioreps at T0 and days to include in the slope calculation
+AggCounts=readRDS("RulesSTARPartProcessedCounts.rds")
+fData(NormCountsEset)$RepsAtT0=AggCounts$count
+fData(NormCountsEset)$DropOff150=as.numeric(str_sub(AggCounts$Stop_150,3,4))/24
+fData(NormCountsEset)$DropOff200=as.numeric(str_sub(AggCounts$Stop_200,3,4))/24
+fData(NormCountsEset)$TotalT0Count=AggCounts$tm0
+#T0 normalization
+t0_averages=exprs(NormCountsEset[,1:5])
+exprs(NormCountsEset)=exprs(NormCountsEset)-as.vector(t0_averages)
+#Regression using subset of data:
+regress1=function(Eset){
+  df=cbind(Eset,SubEset@phenoData@data)
+  res=suppressWarnings(rlm(Eset ~ TimePoint + BioRep, data = df)) 
+  return(res)
+}
+#Aur150
+#Time points 0 and 0.5 days (A)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==150&NormCountsEset@phenoData@data$TimePoint<1|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_A_150=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_A_150=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_A_150=sapply(models, function(i) deviance(i))
+#Time points 0-1 days (B)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==150&NormCountsEset@phenoData@data$TimePoint<2|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_B_150=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_B_150=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_B_150=sapply(models, function(i) deviance(i))
+#Time points 0-2 days (C)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==150&NormCountsEset@phenoData@data$TimePoint<3|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_C_150=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_C_150=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_C_150=sapply(models, function(i) deviance(i))
+#Time points 0-3 days (D)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==150|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_D_150=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_D_150=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_D_150=sapply(models, function(i) deviance(i))
+#Aur200
+#Time points 0 and 0.5 days (A)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==200&NormCountsEset@phenoData@data$TimePoint<1|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_A_200=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_A_200=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_A_200=sapply(models, function(i) deviance(i))
+#Time points 0-1 days (B)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==200&NormCountsEset@phenoData@data$TimePoint<2|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_B_200=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_B_200=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_B_200=sapply(models, function(i) deviance(i))
+#Time points 0-2 days (C)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==200&NormCountsEset@phenoData@data$TimePoint<3|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_C_200=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_C_200=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_C_200=sapply(models, function(i) deviance(i))
+#Time points 0-3 days (D)
+SubEset=NormCountsEset[,NormCountsEset@phenoData@data$Aur==200|str_sub(NormCountsEset@phenoData@data$Sample,1,5)=="LL_1_"]
+models=apply(exprs(SubEset),1,regress1)
+fData(NormCountsEset)$TimeSlope_D_200=sapply(models, function(i) i$coefficients[["TimePoint"]])
+fData(NormCountsEset)$Intercept_D_200=sapply(models, function(i) i$coefficients[["(Intercept)"]])
+fData(NormCountsEset)$Deviance_D_200=sapply(models, function(i) deviance(i))
+#Save
+saveRDS(NormCountsEset,"RulesRegressionLibESet.rds")
+
+```
+
+```{r Exploratory Graphs II}
+NormCountsEset=readRDS("RulesRegressionLibESet.rds")
+#All Sequences
+ggplot(NormCountsEset@featureData@data)+
+  geom_bar(aes(DropOff150,group=RepsAtT0,fill=RepsAtT0))+
+  theme_classic()+
+  labs(title="Aur150")
+ggplot(NormCountsEset@featureData@data)+
+  geom_bar(aes(DropOff200,group=RepsAtT0,fill=RepsAtT0))+
+  theme_classic()+
+  labs(title="Aur200")
+hist(NormCountsEset@featureData@data$TimeSlope_A_150,breaks = 100,xlab="Slope",main="All Sequences 2 Points Aur150")
+hist(NormCountsEset@featureData@data$TimeSlope_B_150,breaks = 100,xlab="Slope",main="All Sequences 3 Points Aur150")
+hist(NormCountsEset@featureData@data$TimeSlope_A_200,breaks = 100,xlab="Slope",main="All Sequences 2 Points Aur200")
+hist(NormCountsEset@featureData@data$TimeSlope_B_200,breaks = 100,xlab="Slope",main="All Sequences 3 Points Aur200")
+
+boxplot(data.frame("t0_t0.5"=NormCountsEset@featureData@data$TimeSlope_A_150,
+                   "t0_t1"=NormCountsEset@featureData@data$TimeSlope_B_150,
+                   "t0_t2"=NormCountsEset@featureData@data$TimeSlope_C_150,
+                   "t0_t3"=NormCountsEset@featureData@data$TimeSlope_D_150),main="All Sequences Aur150",ylab="Slope")
+
+ggplot(NormCountsEset@featureData@data)+
+  geom_boxplot(aes(x=set,y=TimeSlope_A_150))+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title="2 point slopes Aur150")
+ggplot(NormCountsEset@featureData@data)+
+  geom_boxplot(aes(x=set,y=TimeSlope_B_150))+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title="3 point slopes Aur150")
+
+#Stop Codon Controls
+Controls=NormCountsEset[NormCountsEset@featureData@data$set=="stop-first",]
+hist(Controls@featureData@data$TimeSlope_A_150,breaks=10,xlab="Slope",main="Stop Codon First Controls (t0_t0.5 Aur150)")
+hist(Controls@featureData@data$TimeSlope_B_150,breaks=10,xlab="Slope",main="Stop Codon First Controls (t0_t1 Aur150)")
+
+plot(Controls@featureData@data$TimeSlope_A_150,Controls@featureData@data$TimeSlope_B_150,xlab="2 point slopes Aur150",ylab = "3 point slopes Aur150",main = "Stop Codon Controls 2 points vs 3 points")+abline(0,1)
+
+boxplot(data.frame("t0_t0.5"=Controls@featureData@data$TimeSlope_A_150,
+                   "t0_t1"=Controls@featureData@data$TimeSlope_B_150,
+                   "t0_t2"=Controls@featureData@data$TimeSlope_C_150,
+                   "t0_t3"=Controls@featureData@data$TimeSlope_D_150),main="Stop Codon First Controls Aur150",ylab="Slope")
+ggplot(Controls@featureData@data)+
+  geom_bar(aes(DropOff150,group=RepsAtT0,fill=RepsAtT0))+
+  theme_classic()+
+  labs(title="Stop Controls Aur150")
+
+```
+
+## Optimized Slopes
+
+Optimized slope is the slope using the most possible timepoints prior to the data falling to 0 counts.
+Sequences filtered out:
+  fewer than 2 bioreps had counts at T0
+  counts dropped to 0 at day 1
+
+```{r Optimized Slopes, eval=FALSE}
+NormCountsEset=readRDS("RulesRegressionLibESet.rds")
+#Filter out sequences with only a single biorep with counts at T0 and sequences that fall to 0 counts on day 1.
+FilteredEset=NormCountsEset[NormCountsEset@featureData@data$RepsAtT0>1,]
+#FilteredEset=FilteredEset[FilteredEset@featureData@data$DropOff>1,] #This would remove ~half of the sequences
+
+#Compile the optimized slopes, intercepts, and deviance for each sequence 150Aur
+IDsandSlopes150=data.frame(ID=c(FilteredEset[FilteredEset@featureData@data$DropOff150==0.5,]@featureData@data$index,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==1,]@featureData@data$index,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==2,]@featureData@data$index,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==3,]@featureData@data$index),
+               OptimizedSlope=c(FilteredEset[FilteredEset@featureData@data$DropOff150==0.5,]@featureData@data$TimeSlope_A_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==1,]@featureData@data$TimeSlope_B_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==2,]@featureData@data$TimeSlope_C_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==3,]@featureData@data$TimeSlope_D_150),
+                    Intercept=c(FilteredEset[FilteredEset@featureData@data$DropOff150==0.5,]@featureData@data$Intercept_A_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==1,]@featureData@data$Intercept_B_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==2,]@featureData@data$Intercept_C_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==3,]@featureData@data$Intercept_D_150),
+                     Deviance=c(FilteredEset[FilteredEset@featureData@data$DropOff150==0.5,]@featureData@data$Deviance_A_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==1,]@featureData@data$Deviance_B_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==2,]@featureData@data$Deviance_C_150,
+                                FilteredEset[FilteredEset@featureData@data$DropOff150==3,]@featureData@data$Deviance_D_150))
+IDsandSlopes150=arrange(IDsandSlopes150,ID)
+#Add new feature column with the optimized slopes
+fData(FilteredEset)$OptimizedSlope150=IDsandSlopes150$OptimizedSlope
+fData(FilteredEset)$OptimizedIntercept150=IDsandSlopes150$Intercept
+fData(FilteredEset)$OptimizedDeviance150=IDsandSlopes150$Deviance
+#Compile the optimized slopes, intercepts, and deviance for each sequence 200Aur
+IDsandSlopes200=data.frame(ID=c(FilteredEset[FilteredEset@featureData@data$DropOff200==0.5,]@featureData@data$index,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==1,]@featureData@data$index,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==2,]@featureData@data$index,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==3,]@featureData@data$index),
+               OptimizedSlope=c(FilteredEset[FilteredEset@featureData@data$DropOff200==0.5,]@featureData@data$TimeSlope_A_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==1,]@featureData@data$TimeSlope_B_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==2,]@featureData@data$TimeSlope_C_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==3,]@featureData@data$TimeSlope_D_200),
+                    Intercept=c(FilteredEset[FilteredEset@featureData@data$DropOff200==0.5,]@featureData@data$Intercept_A_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==1,]@featureData@data$Intercept_B_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==2,]@featureData@data$Intercept_C_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==3,]@featureData@data$Intercept_D_200),
+                     Deviance=c(FilteredEset[FilteredEset@featureData@data$DropOff200==0.5,]@featureData@data$Deviance_A_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==1,]@featureData@data$Deviance_B_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==2,]@featureData@data$Deviance_C_200,
+                                FilteredEset[FilteredEset@featureData@data$DropOff200==3,]@featureData@data$Deviance_D_200))
+IDsandSlopes200=arrange(IDsandSlopes200,ID)
+#Add new feature column with the optimized slopes
+fData(FilteredEset)$OptimizedSlope200=IDsandSlopes200$OptimizedSlope
+fData(FilteredEset)$OptimizedIntercept200=IDsandSlopes200$Intercept
+fData(FilteredEset)$OptimizedDeviance200=IDsandSlopes200$Deviance
+
+saveRDS(FilteredEset,"RulesFilteredNormalizedEset.rds")
+
+```
+
+```{r Exploratory Graphs III}
+FilteredEset=readRDS("RulesFilteredNormalizedEset.rds")
+
+##Aur150
+#Stop Codon Controls Aur150
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$OptimizedSlope150,breaks = 20,xlab="Slope",main="Stop Codon Controls Optimized Slope Aur150")
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$TimeSlope_A_150,breaks = 20,xlab="Slope",main="Stop Codon Controls 2-point Slope Aur150")
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$TimeSlope_B_150,breaks = 20,xlab="Slope",main="Stop Codon Controls 3-point Slope Aur150")
+
+#All Sequences Aur150
+hist(FilteredEset@featureData@data$OptimizedSlope150,breaks = 20,xlab="Slope",main="All Sequences Optimized Slope Aur150")
+hist(FilteredEset@featureData@data$TimeSlope_A_150,breaks = 20,xlab="Slope",main="All Sequences 2-point Slope Aur150")
+hist(FilteredEset@featureData@data$TimeSlope_B_150,breaks = 20,xlab="Slope",main="All Sequences 3-point Slope Aur150")
+
+
+##Aur200
+#Stop Codon Controls Aur200
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$OptimizedSlope200,breaks = 20,xlab="Slope",main="Stop Codon Controls Optimized Slope Aur200")
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$TimeSlope_A_200,breaks = 20,xlab="Slope",main="Stop Codon Controls 2-point Slope Aur200")
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$TimeSlope_B_200,breaks = 20,xlab="Slope",main="Stop Codon Controls 3-point Slope Aur200")
+
+#All Sequences Aur200
+hist(FilteredEset@featureData@data$OptimizedSlope200,breaks = 20,xlab="Slope",main="All Sequences Optimized Slope Aur200")
+hist(FilteredEset@featureData@data$TimeSlope_A_200,breaks = 20,xlab="Slope",main="All Sequences 2-point Slope Aur200")
+hist(FilteredEset@featureData@data$TimeSlope_B_200,breaks = 20,xlab="Slope",main="All Sequences 3-point Slope Aur200")
+
+#Time for counts to drop-off
+ggplot(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data)+
+  geom_bar(aes(DropOff200,group=OptimizedSlope200,fill=OptimizedSlope200))+
+  theme_classic()+
+  labs(title="Stop Codon Controls")
+ggplot(FilteredEset@featureData@data)+
+  geom_bar(aes(DropOff200,group=OptimizedSlope200,fill=OptimizedSlope200))+
+  theme_classic()+
+  labs(title="All Sequences")
+
+#Intercept vs Deviance
+hist(FilteredEset@featureData@data$OptimizedIntercept200,main="Intercept")
+hist(log2(FilteredEset@featureData@data$OptimizedDeviance200),main="log2 Deviance")
+plot(abs(FilteredEset@featureData@data$OptimizedIntercept200),log2(FilteredEset@featureData@data$OptimizedDeviance200),xlab="Intercept",ylab="log2 Deviance")
+
+ggplot(FilteredEset@featureData@data)+
+  geom_boxplot(aes(x=set,y=log2(OptimizedDeviance200)))+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title="Deviance (log2) for optimized slopes")
+ggplot(FilteredEset@featureData@data)+
+  geom_boxplot(aes(x=set,y=log2(Deviance_B_200)))+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title="Deviance (log2) for 3 point slopes")
+ggplot(FilteredEset@featureData@data)+
+  geom_boxplot(aes(x=set,y=log2(Deviance_A_200)))+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  labs(title="Deviance (log2) for 2 point slopes")
+
+#Total counts at time 0 vs deviance 
+plot(FilteredEset@featureData@data$TotalT0Count,log2(FilteredEset@featureData@data$OptimizedDeviance200),xlab="Total Count at T0",ylab="log2 Deviance")
+plot(FilteredEset@featureData@data$TotalT0Count,FilteredEset@featureData@data$OptimizedIntercept200,xlab="Total Count at T0",ylab="Intercept")
+
+```
+
+## Stop Codon Control Normalization
+
+The threshold for activity is defined by the stop codon controls using one of the following methods:
+1. The average of the ten "least impaired" sequences (old method not used here)
+2. Two standard deviations above the mean for all sequences
+The respective thresholds were calculated for 2-point, 3-point, and optimized slopes. Adjusted slopes were calculated by subtracting the threshold value from all samples.
+
+The average slope for the "least impaired" stop codon controls is used to define the threshold for activity.
+
+```{r Stop Codon Control Normalization, eval=FALSE}
+FilteredEset=readRDS("RulesFilteredNormalizedEset.rds")
+
+#200Aur
+fData(FilteredEset)$SlopeOrNF200=FilteredEset@featureData@data$TimeSlope_A_200
+fData(FilteredEset)=mutate(fData(FilteredEset),SlopeOrNF200=replace(SlopeOrNF200,FilteredEset@featureData@data$DropOff200<1,NA))
+
+ggplot(fData(FilteredEset)[FilteredEset@featureData@data$set=="stop-first",])+
+  geom_boxplot(aes(x=DropOff200<1,y=TimeSlope_A_200))
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeOrNF200,breaks = 20,xlab="Slope",main="Stop Codon Controls 2-point Slope Aur200")
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$TimeSlope_A_200,breaks = 20,xlab="Slope",main="Stop Codon Controls 2-point Slope Aur200")
+
+#Threshold from mean+2*sd of stop codon controls:
+#Time points 0 and 0.5 days (A)
+SD2pt200=mean(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeOrNF200,na.rm=TRUE)+
+  sd(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeOrNF200,na.rm = TRUE)*2
+#Subtract mean+2*sd of stop codon controls from respective 2-point, 3-point, or optimized slope 
+fData(FilteredEset)$SlopeFinal200=FilteredEset@featureData@data$SlopeOrNF200-SD2pt200
+
+
+#150Aur
+fData(FilteredEset)$SlopeOrNF150=FilteredEset@featureData@data$TimeSlope_A_150
+fData(FilteredEset)=mutate(fData(FilteredEset),SlopeOrNF150=replace(SlopeOrNF150,FilteredEset@featureData@data$DropOff150<1,NA))
+
+ggplot(fData(FilteredEset)[FilteredEset@featureData@data$set=="stop-first",])+
+  geom_boxplot(aes(x=DropOff150<1,y=TimeSlope_A_150))
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeOrNF150,breaks = 20,xlab="Slope",main="Stop Codon Controls 2-point Slope Aur150")
+hist(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$TimeSlope_A_150,breaks = 20,xlab="Slope",main="Stop Codon Controls 2-point Slope Aur150")
+
+#Threshold from mean+2*sd of stop codon controls:
+#Time points 0 and 0.5 days (A)
+SD2pt150=mean(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeOrNF150,na.rm=TRUE)+
+  sd(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeOrNF150,na.rm = TRUE)*2
+#Subtract mean+2*sd of stop codon controls from respective 2-point, 3-point, or optimized slope 
+fData(FilteredEset)$SlopeFinal150=FilteredEset@featureData@data$SlopeOrNF150-SD2pt150
+
+fData(FilteredEset)$SlopeFinalAvg=rowMeans(fData(FilteredEset)[,c(43,45)],na.rm = TRUE)
+fData(FilteredEset)=mutate(fData(FilteredEset),SlopeFinalAvg=replace(SlopeFinalAvg,FilteredEset@featureData@data$SlopeFinalAvg=="NaN",NA))
+
+saveRDS(FilteredEset,"RulesFilteredNormalizedEset.rds")
+
+plot(FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeFinal200,FilteredEset[FilteredEset@featureData@data$set=="stop-first",]@featureData@data$SlopeFinal150)
+plot(FilteredEset@featureData@data$SlopeFinal200,FilteredEset@featureData@data$SlopeFinal150)
+
+#Simplified data table to analyze
+AllSequencesData=data.frame(ID=FilteredEset@featureData@data$index,
+                            Slope=FilteredEset@featureData@data$SlopeFinalAvg,
+                            Sequence=FilteredEset@featureData@data$aa_seq,
+                            Set=FilteredEset@featureData@data$set)
+saveRDS(AllSequencesData,"RulesLibSequenceData.rds")
+
+```
+
+```{r Exploratory Graphs IV}
+FilteredEset=readRDS("RulesFilteredNormalizedEset.rds")
+RulesFData=fData(FilteredEset)
+RulesFData$extra=RulesFData$set
+#Condensing sets
+RulesFData[grepl("wp-template1-.*",RulesFData$set),]$extra="wp-template1-modified"
+RulesFData[grepl("wp-template2-.*",RulesFData$set),]$extra="wp-template2-modified"
+RulesFData[grepl("wt-controls.*",RulesFData$set),]$extra="wt-controls"
+RulesFData$set=gsub("wt-controls-","",RulesFData$set)
+
+#RulesFData[grepl("wt-controls.*",RulesFData$set),]$extra=
+RulesFData$extra=factor(RulesFData$extra)
+Reordered=levels(RulesFData$extra)[c(72,67,63,1:4,16,27,38,42:47,17:26,28:37,39:41,5:8,48:62,12,64:66,9:11,13:15,73:75,68:71)]
+
+ggplot(RulesFData)+
+  geom_boxplot(aes(x=factor(extra,levels = Reordered),y=SlopeFinal200))+
+  theme_classic()+
+  labs(title="All Sequences")+ 
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(RulesFData[str_sub(RulesFData$set,1,3)=="set",])+
+  geom_boxplot(aes(x=factor(extra,levels = Reordered),y=SlopeFinal200))+
+  theme_classic()+
+  labs(title="Rules Set Sequences")+ 
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(RulesFData[RulesFData$extra=="wt-controls"|
+                    RulesFData$extra=="WD-controls"|
+                    RulesFData$extra=="stop-first",])+
+  geom_boxplot(aes(x=set,y=SlopeFinal200))+
+  theme_classic()+
+  labs(title="Control Sequences")+ 
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(RulesFData[RulesFData$extra=="1f1d"|
+                  RulesFData$extra=="1w1d"|
+                  RulesFData$extra=="2f2d"|
+                  RulesFData$extra=="2w2d"|
+                  RulesFData$extra=="stop-first",])+
+  geom_boxplot(aes(x=factor(set,levels = c("stop-first","1w1d","2w2d","1f1d","2f2d")),y=SlopeFinal200))+
+  theme_classic()+
+  labs(title="Low W/D Count Control Sequences")+ 
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(FilteredEset[str_sub(FilteredEset@featureData@data$set,1,5)=="set32"|
+                    str_sub(FilteredEset@featureData@data$set,1,3)=="all"|
+                    str_sub(FilteredEset@featureData@data$set,1,4)=="some"  ,]@featureData@data)+
+  geom_boxplot(aes(x=set,y=SlopeFinal200))+
+  theme_classic()+
+  labs(title="Set32 Variants")+
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(FilteredEset[str_sub(FilteredEset@featureData@data$set,1,11)=="wp-template",]@featureData@data)+
+  geom_boxplot(aes(x=set,y=SlopeFinal200))+
+  theme_classic()+
+  labs(title="WP-template")+
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(FilteredEset[str_sub(FilteredEset@featureData@data$set,3,11)=="neighbors",]@featureData@data)+
+  geom_boxplot(aes(x=set,y=SlopeFinal200))+
+  theme_classic()+
+  labs(title="DGxWy template")+
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+
+```{r Estimating Slopes for Sequences with low counts}
+CountsEset=readRDS("RulesLibESet.rds")
+CountsDF=data.frame(T0means=rowMeans(exprs(CountsEset)[,1:5]),
+                    T12hmeans=rowMeans(exprs(CountsEset)[,36:40]),
+                    names=fData(CountsEset)$index)
+
+FilteredEset=readRDS("RulesFilteredNormalizedEset.rds")
+Fdata=fData(FilteredEset)
+Fdata$T0means=log2(CountsDF$T0means[match(Fdata$index,CountsDF$names)]+1)
+Fdata$T12hmeans=log2(CountsDF$T12hmeans[match(Fdata$index,CountsDF$names)]+1)
+
+ggplot(Fdata)+
+  geom_boxplot(aes(x=set, y=T0means,fill=set))+
+  scale_fill_manual(values = "red",breaks = "stop-first",limits="stop-first")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),legend.position = "none")
+
+ggplot(Fdata)+
+  geom_boxplot(aes(x=set, y=T12hmeans,fill=set))+
+  scale_fill_manual(values = "red",breaks = "stop-first",limits="stop-first")+
+  theme_classic()+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),legend.position = "none")
+
+ggplot(Fdata)+
+  geom_point(aes(x=T0means,y=SlopeOrNF200))+
+  theme_classic()
+
+filter(Fdata,set=="stop-first")%>%
+  ggplot(aes(x=DropOff200>0.5,y=T0means))+
+  geom_boxplot()+
+  theme_classic()
+
+Stopfdata=filter(Fdata,set=="stop-first")
+Stopfdata$Time=rtri(nrow(Stopfdata),min=0.25,max=0.5,mode = 0.45)
+Stopfdata$EstimatedSlope=(Stopfdata$T12hmeans-Stopfdata$T0means)/Stopfdata$Time
+Stopfdata$EstimatedSlope[Stopfdata$DropOff200>0.5]=Stopfdata$SlopeOrNF200[Stopfdata$DropOff200>0.5]
+
+ggplot(Stopfdata)+
+  geom_boxplot(aes(x=DropOff200>0.5,y=EstimatedSlope))+
+  theme_classic()
+
+EstSlopeReps=filter(Stopfdata,DropOff200>0.5)%>%dplyr::select(Slope=SlopeOrNF200)%>%mutate(Group=rep("RealSlopes",nrow(Stopfdata[Stopfdata$DropOff200>0.5,])))
+EstSeqs=filter(Stopfdata,DropOff200==0.5)
+Temp=data.frame(Slope=(EstSeqs$T12hmeans-EstSeqs$T0means)/0.5,Group=rep("Predicted",nrow(EstSeqs)))
+EstSlopeReps=rbind(EstSlopeReps,Temp)
+
+for (i in 1:10) {
+  set.seed(10*i)
+  Time=rtri(nrow(EstSeqs),min=0.1,max=0.5,mode = 0.45)
+  Temp=data.frame(Slope=(EstSeqs$T12hmeans-EstSeqs$T0means)/Time,Group=rep(paste("Est",i,sep = ""),nrow(EstSeqs)))
+  EstSlopeReps=rbind(EstSlopeReps,Temp)
+}
+
+ggplot(EstSlopeReps)+
+  geom_boxplot(aes(x=Group,y=Slope,fill=Group))+
+  scale_fill_manual(values = "red",breaks = "RealSlopes",limits="RealSlopes")+
+  theme_classic()+  
+  theme(legend.position = "none")
+
+```

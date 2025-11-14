@@ -1,0 +1,1125 @@
+---
+title: "tAD-Rules-Designed-Library-Analysis"
+author: "David Cooper"
+date: "2025-11-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(pheatmap)
+library(limma)
+library(Biobase)
+library(MASS)
+library(scales)
+library(caret)
+library(pROC)
+library(ROCR)
+library(stringr)
+library(patchwork)
+source("run5ML-Function.R")
+source("RulesFeatureFunctions.R")
+
+```
+
+## Load and Prep Data
+
+Definition of Rules:                                                        Reorder Rules
+1.  Presence of aromatic [WYF] AND acidic [DE]                                 [1]
+2.	Absence of basic [RHK]                                                     [3]
+3.	Redundant aromatic and acidic (3 or more of each)                          [2]
+4.	Balanced aromatic and acidic (equal amount)                                [4]
+5.	Avoid clustering aromatics (avoids aggregates)                             [6]
+  a.	50% of W neighbors have to be something other than W                   
+6.	C-terminal preference of aromatics (aromatic terminal, acidic internal)    [5]
+  a.	Average position of W is past position 12 (of 20)
+
+
+```{r Load and Prep Data}
+FilteredEset=readRDS("RulesFilteredNormalizedEset.rds")
+fData(FilteredEset)$Wcount=nchar(fData(FilteredEset)$aa_seq)-nchar(gsub("W","",fData(FilteredEset)$aa_seq))
+fData(FilteredEset)$Dcount=nchar(fData(FilteredEset)$aa_seq)-nchar(gsub("D","",fData(FilteredEset)$aa_seq))
+fData(FilteredEset)$Rcount=nchar(fData(FilteredEset)$aa_seq)-nchar(gsub("R","",fData(FilteredEset)$aa_seq))
+
+RulesEset=FilteredEset[str_sub(fData(FilteredEset)$set,1,3)=="set"|
+                         fData(FilteredEset)$set=="GWRD-random"|
+                         fData(FilteredEset)$set=="stop-first",]
+RulesFData=fData(RulesEset)
+RulesFData$extra=RulesFData$set
+
+RulesFData=RulesFData %>% 
+  mutate(extra=recode(extra,
+                      set1="100000",
+                      set2="110000",
+                      set3="101000",
+                      set4="111000",
+                      set5="100100",
+                      set6="110100",
+                      set7="101100",
+                      set8="111100",
+                      set9="100010",
+                      set10="110010",
+                      set11="101010",
+                      set12="111010",
+                      set13="100110",
+                      set14="110110",
+                      set15="101110",
+                      set16="111110",
+                      set17="100001",
+                      set18="110001",
+                      set19="101001",
+                      set20="111001",
+                      set21="100101",
+                      set22="110101",
+                      set23="101101",
+                      set24="111101",
+                      set25="100011",
+                      set26="110011",
+                      set27="101011",
+                      set28="111011",
+                      set29="100111",
+                      set30="110111",
+                      set31="101111",
+                      set32="111111",
+                      `stop-first`="000000",
+                      `GWRD-random`="000000"))
+
+Temp=t(as.data.frame(str_split(RulesFData$extra,"")))
+colnames(Temp)=c("Rule1","Rule2","Rule3","Rule4","Rule5","Rule6")
+RulesFData=cbind(RulesFData,Temp)
+RulesFData$Charge=RulesFData$Rcount-RulesFData$Dcount
+
+#Organize rule set data
+OrganizeSets=data.frame(Set=rep("set",32),Number=1:32)
+SetOrder=paste(OrganizeSets$Set,OrganizeSets$Number,sep = "")
+RulesTable=pivot_longer(RulesFData[!grepl("random",RulesFData$set),c("index","aa_seq","set","SlopeFinal200","Rule1","Rule2","Rule3","Rule4","Rule5","Rule6")],cols = c(5:10),names_to = "Rule",values_to = "Value")
+
+#Sets for Redundancy graphs
+RedundantFData=fData(FilteredEset[grepl("set|1w1d|2w2d|GWRD",FilteredEset@featureData@data$set),])
+RedundantFData$Charge=RedundantFData$Rcount-RedundantFData$Dcount
+
+#Sets for Regression Analysis
+#RulesLibData=RulesFData[!grepl("stop-first",RulesFData$set)&!is.na(RulesFData$SlopeFinal200),]
+#TrainSetData=read.delim("Training_Set.txt",header = TRUE)
+#RandomTrainData=TrainSetData[TrainSetData$publication=="hahn",]
+#NaturalTrainData=TrainSetData[TrainSetData$publication=="sanborn",]
+#TestSetData=read.delim("Testing_Set.txt",header = TRUE)
+#RandomTestData=TestSetData[TestSetData$publication=="hahn",]
+#NaturalTestData=TestSetData[TestSetData$publication=="sanborn",]
+RulesDF=readRDS("RulesDataFrames/RulesDF.rds")
+Balancedf=RulesDF[RulesDF$Sequence %in% RulesFData[RulesFData$set!="stop-first",]$aa_seq & RulesDF$Redundancy>2 & RulesDF$R==0,]
+RandomTrainDF=readRDS("RulesDataFrames/RandomTrainDF.rds")
+NaturalTrainDF=readRDS("RulesDataFrames/NaturalTrainDF.rds")
+RandomTestDF=readRDS("RulesDataFrames/RandomTestDF.rds")
+NaturalTestDF=readRDS("RulesDataFrames/NaturalTestDF.rds")
+
+#Sets for Rules graphs
+RulesFData=RulesFData[!grepl("random",RulesFData$set)&!is.na(RulesFData$SlopeFinal200),]
+RulesFData$set=as.factor(RulesFData$set)
+RulesFData$set=fct_relevel(RulesFData$set,
+                           c("set32","set24","set16","set8",
+                             "set28","set20","set12","set4",
+                             "set31","set23","set15","set27",
+                             "set7","set19","set11","set3",
+                             "set30","set22","set14","set26",
+                             "set29","set6","set18","set21",
+                             "set10","set13","set25","set2",
+                             "set5","set17","set9","set1","stop-first"))
+RulesTable$set=as.factor(RulesTable$set)
+RulesTable$set=fct_relevel(RulesTable$set,
+                           c("set32","set24","set16","set8",
+                             "set28","set20","set12","set4",
+                             "set31","set23","set15","set27",
+                             "set7","set19","set11","set3",
+                             "set30","set22","set14","set26",
+                             "set29","set6","set18","set21",
+                             "set10","set13","set25","set2",
+                             "set5","set17","set9","set1","stop-first"))
+
+```
+
+## Summary of Rules
+
+How important/critical are each of the rules?
+Which combination of rules produce the most functional sequences?
+
+```{r Regression of Orignial Rules}
+#Linear Regression [Function per rule followed]
+DFforRegression=RulesFData[!grepl("stop|random",RulesFData$set),c("SlopeFinal200","Rule2","Rule3","Rule4","Rule5","Rule6")]
+LMrules=lm(SlopeFinal200~.,DFforRegression)
+summary(LMrules)
+
+#Ridge Regression Machine Learning
+DFforRegression$binary_stop=gsub("FALSE","die",gsub("TRUE","live",DFforRegression$SlopeFinal200>0))
+Temp=run_5ml(DFforRegression[,-1],regtype = 0) #%>% mean()
+
+TempDF=data.frame(Specificity=0,Sensitivity=0,Model=0)
+TempDF=rbind(TempDF,data.frame(Specificity=Temp[[1]]$specificities,Sensitivity=Temp[[1]]$sensitivities,Model=1))
+TempDF=rbind(TempDF,data.frame(Specificity=Temp[[2]]$specificities,Sensitivity=Temp[[2]]$sensitivities,Model=2))
+TempDF=rbind(TempDF,data.frame(Specificity=Temp[[3]]$specificities,Sensitivity=Temp[[3]]$sensitivities,Model=3))
+TempDF=rbind(TempDF,data.frame(Specificity=Temp[[4]]$specificities,Sensitivity=Temp[[4]]$sensitivities,Model=4))
+TempDF=rbind(TempDF,data.frame(Specificity=Temp[[5]]$specificities,Sensitivity=Temp[[5]]$sensitivities,Model=5))
+
+ggplot(TempDF[-1,])+
+  geom_line(aes(Specificity,Sensitivity,colour = factor(Model)),linetype=2,linewidth = 1.5)+
+  geom_abline(slope=1, intercept = 1,linewidth=1.2)+  
+  theme_classic()+
+  scale_x_reverse()+
+  labs(title="Rules ROC curves AUC: 0.928")+
+  theme(axis.text = element_text(size=14,face = "bold",color="black"),axis.title=element_text(size=16,face="bold",color="black"),
+        legend.text = element_text(size=12,face = "bold",color="black"),legend.title=element_text(size=14,face="bold",color="black"),
+        legend.position = "none")
+
+```
+
+```{r Rules Set Graphs w/ Stop}
+#All Rule Combinations
+RulesTable$NewRule=RulesTable$Rule
+RulesTable=RulesTable%>%mutate(NewRule=recode(NewRule,
+                                   "Rule1"="Rule1",
+                                   "Rule2"="Rule3",
+                                   "Rule3"="Rule2",
+                                   "Rule4"="Rule4",
+                                   "Rule5"="Rule6",
+                                   "Rule6"="Rule5"))
+
+P1=ggplot(RulesFData)+
+  geom_boxplot(aes(x=set,y=SlopeFinal200))+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+  
+  theme(axis.text.x = element_blank(),axis.text = element_text(size=14),axis.title.y = element_text(size=16,vjust = -4))
+
+P2=ggplot(RulesTable)+
+  geom_tile(aes(x=set,y=NewRule,fill=Value))+
+  scale_fill_manual(values = c("white","black"))+
+  scale_x_discrete(labels=c(paste0("Set ",1:32),"Stop"))+
+  scale_y_discrete(limits=c("Rule6","Rule5","Rule4","Rule3","Rule2","Rule1"),labels=c("Rule 6","Rule 5","Rule 4","Rule 3","Rule 2","Rule 1"))+
+  theme_classic()+
+  ylab("")+
+  xlab("")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),legend.position = "none",axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+P=P1/plot_spacer()/P2 + plot_layout(heights = c(3.5, -0.5 ,1.7),guides = "collect")
+ggsave("Figures/RulesSummary.png",P)
+
+#Effect of Breaking Individual Rules
+ggplot(RulesFData[RulesFData$set %in% c("set1","set16","set24","set28","set30","set31","set32"),])+
+  geom_boxplot(aes(x=factor(set,levels = c("set32","set31","set30","set28","set24","set16","set1")),y=SlopeFinal200))+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+  
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+
+```{r Recalculate Rules Old vs New Versions, eval=FALSE}
+##Calculate Rules
+RulesDF=CalcRules(Seqs = RulesLibData$aa_seq, Slopes = RulesLibData$SlopeFinal200)
+saveRDS(RulesDF,"RulesDataFrames/RulesDF.rds")
+
+RandomTrainDF=CalcRules(Seqs = RandomTrainData$sequence, Slopes = RandomTrainData$score, ClusterRedundancy = 4)
+saveRDS(RandomTrainDF,"RulesDataFrames/RandomTrainDF.rds")
+
+NaturalTrainDF=CalcRules(Seqs = NaturalTrainData$sequence, Slopes = NaturalTrainData$score, ClusterRedundancy = 4)
+saveRDS(NaturalTrainDF,"RulesDataFrames/NaturalTrainDF.rds")
+
+RandomTestDF=CalcRules(Seqs = RandomTestData$sequence, Slopes = RandomTestData$score, ClusterRedundancy = 4)
+saveRDS(RandomTestDF,"RulesDataFrames/RandomTestDF.rds")
+
+NaturalTestDF=CalcRules(Seqs = NaturalTestData$sequence, Slopes = NaturalTestData$score, ClusterRedundancy = 4)
+saveRDS(NaturalTestDF,"RulesDataFrames/NaturalTestDF.rds")
+
+#Lasso Regression
+#Rules Library
+LiblassoOldRules=train(SlopeBinary ~., data = RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="Old"|colnames(RulesDF)=="SlopeBinary"], 
+                    method = "glmnet",
+                    trControl = trainControl("cv", number = 10),
+                    tuneGrid = expand.grid(alpha = 1, lambda = 10^seq(-3, -2, length = 20)))
+saveRDS(LiblassoOldRules,"Regressions/LiblassoOldRules.rds")
+
+LiblassoNewRules=train(SlopeBinary ~., data = RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="New"|colnames(RulesDF)=="SlopeBinary"], 
+                       method = "glmnet",
+                       trControl = trainControl("cv", number = 10),
+                       tuneGrid = expand.grid(alpha = 1, lambda = 10^seq(-3, -2, length = 20)))
+saveRDS(LiblassoNewRules,"Regressions/LiblassoNewRules.rds")
+
+#Random Library
+RanlassoOldRules=train(SlopeBinary ~., data = RandomTrainDF[,str_sub(colnames(RandomTrainDF),-3,-1)=="Old"|
+                                                              colnames(RandomTrainDF)=="SlopeBinary"], 
+                    method = "glmnet",
+                    trControl = trainControl("cv", number = 10),
+                    tuneGrid = expand.grid(alpha = 1, lambda = 10^seq(-3, -2, length = 20)))
+saveRDS(RanlassoOldRules,"Regressions/RanlassoOldRules.rds")
+
+RanlassoNewRules=train(SlopeBinary ~., data = RandomTrainDF[,str_sub(colnames(RandomTrainDF),-3,-1)=="New"|
+                                                              colnames(RandomTrainDF)=="SlopeBinary"], 
+                        method = "glmnet",
+                        trControl = trainControl("cv", number = 10),
+                        tuneGrid = expand.grid(alpha = 1, lambda = 10^seq(-3, -2, length = 20)))
+saveRDS(RanlassoNewRules,"Regressions/RanlassoNewRules.rds")
+
+#Natural Library
+NatlassoOldRules=train(SlopeBinary ~., data = NaturalTrainDF[,str_sub(colnames(NaturalTrainDF),-3,-1)=="Old"|
+                                                               colnames(NaturalTrainDF)=="SlopeBinary"], 
+                        method = "glmnet",
+                        trControl = trainControl("cv", number = 10),
+                        tuneGrid = expand.grid(alpha = 1, lambda = 10^seq(-3, -2, length = 20)))
+saveRDS(NatlassoOldRules,"Regressions/NatlassoOldRules.rds")
+
+NatlassoNewRules=train(SlopeBinary ~., data = NaturalTrainDF[,str_sub(colnames(NaturalTrainDF),-3,-1)=="New"|
+                                                               colnames(NaturalTrainDF)=="SlopeBinary"], 
+                        method = "glmnet",
+                        trControl = trainControl("cv", number = 10),
+                        tuneGrid = expand.grid(alpha = 1, lambda = 10^seq(-3, -2, length = 20)))
+saveRDS(NatlassoNewRules,"Regressions/NatlassoNewRules.rds")
+
+```
+
+```{r Regression of Old vs New Rules}
+##Load Lasso Models
+LiblassoOldRules=readRDS("Regressions/LiblassoOldRules.rds")
+LiblassoNewRules=readRDS("Regressions/LiblassoNewRules.rds")
+RanlassoOldRules=readRDS("Regressions/RanlassoOldRules.rds")
+RanlassoNewRules=readRDS("Regressions/RanlassoNewRules.rds")
+NatlassoOldRules=readRDS("Regressions/NatlassoOldRules.rds")
+NatlassoNewRules=readRDS("Regressions/NatlassoNewRules.rds")
+
+
+##Model Predictions
+#Random: Test Set Sequences - Train Set Old Rules (AUC = 0.783)
+predicted_prob=predict(RanlassoOldRules, RandomTestDF[,str_sub(colnames(RandomTestDF),-3,-1)=="Old"|
+                                                        colnames(RandomTestDF)=="SlopeBinary"],type = "prob")
+myroc=roc(RandomTestDF$SlopeBinary, predicted_prob$`1`)
+auc=myroc$auc %>% as.numeric() %>% round(3)
+auc=ifelse(auc < 0.5, 1 - auc, auc)
+plot.roc(myroc)
+print(varImp(RanlassoOldRules))
+
+#Random: Test Set Sequences - Train Set New Rules (AUC = 0.875)
+predicted_prob=predict(RanlassoNewRules, RandomTestDF[,str_sub(colnames(RandomTestDF),-3,-1)=="New"|
+                                                      colnames(RandomTestDF)=="SlopeBinary"],type = "prob")
+myroc=roc(RandomTestDF$SlopeBinary, predicted_prob$`1`)
+auc=myroc$auc %>% as.numeric() %>% round(3)
+auc=ifelse(auc < 0.5, 1 - auc, auc)
+plot.roc(myroc)
+print(varImp(RanlassoNewRules))
+
+#Natural: Test Set Sequences - Train Set Old Rules (AUC = 0.630)
+predicted_prob=predict(NatlassoOldRules, NaturalTestDF[,str_sub(colnames(NaturalTestDF),-3,-1)=="Old"|
+                                                         colnames(NaturalTestDF)=="SlopeBinary"],type = "prob")
+myroc=roc(NaturalTestDF$SlopeBinary, predicted_prob$`1`)
+auc=myroc$auc %>% as.numeric() %>% round(3)
+auc=ifelse(auc < 0.5, 1 - auc, auc)
+plot.roc(myroc)
+print(varImp(NatlassoOldRules))
+
+#Natural: Test Set Sequences - Train Set New Rules (AUC = 0.738)
+predicted_prob=predict(NatlassoNewRules,NaturalTestDF[,str_sub(colnames(NaturalTestDF),-3,-1)=="New"|
+                                                     colnames(NaturalTestDF)=="SlopeBinary"],type = "prob")
+myroc=roc(NaturalTestDF$SlopeBinary, predicted_prob$`1`)
+auc=myroc$auc %>% as.numeric() %>% round(3)
+auc=ifelse(auc < 0.5, 1 - auc, auc)
+plot.roc(myroc)
+print(varImp(NatlassoNewRules))
+
+#Designed Lib: Train AUC Old Rules (AUC = 0.921)
+predicted_prob=predict.train(LiblassoOldRules, RulesDF,type = "prob")
+myroc=roc(RulesDF$SlopeBinary, predicted_prob$`1`)
+auc=myroc$auc %>% as.numeric() %>% round(3)
+auc=ifelse(auc < 0.5, 1 - auc, auc)
+plot.roc(myroc)
+print(varImp(LiblassoOldRules))
+
+#Designed Lib: Train AUC New Rules (AUC = 0.944)
+predicted_prob=predict.train(LiblassoNewRules, RulesDF,type = "prob")
+myroc=roc(RulesDF$SlopeBinary, predicted_prob$`1`)
+auc=myroc$auc %>% as.numeric() %>% round(3)
+auc=ifelse(auc < 0.5, 1 - auc, auc)
+plot.roc(myroc)
+print(varImp(LiblassoNewRules))
+
+#Designed Lib: Avg Test AUC Old Rules (AUC = 0.915) - New Rules (AUC = 0.944)
+RulesDF$binary_stop=with(RulesDF,ifelse(SlopeBinary==1,"live","die"))
+LiblassoOldRulesAvg=run_5ml(RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="Old"|
+                                      colnames(RulesDF)=="binary_stop"],regtype = 1)
+mean(c(LiblassoOldRulesAvg[[1]]$auc,
+       LiblassoOldRulesAvg[[2]]$auc,
+       LiblassoOldRulesAvg[[3]]$auc,
+       LiblassoOldRulesAvg[[4]]$auc,
+       LiblassoOldRulesAvg[[5]]$auc))
+LiblassoNewRulesAvg=run_5ml(RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="New"|
+                                      colnames(RulesDF)=="binary_stop"],regtype = 1)
+mean(c(LiblassoNewRulesAvg[[1]]$auc,
+       LiblassoNewRulesAvg[[2]]$auc,
+       LiblassoNewRulesAvg[[3]]$auc,
+       LiblassoNewRulesAvg[[4]]$auc,
+       LiblassoNewRulesAvg[[5]]$auc))
+
+
+##Linear Regression
+#Designed Library
+LMrulesOld=lm(Slope~.,RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="Old"|colnames(RulesDF)=="Slope"])
+summary(LMrulesOld)
+LMrulesNew=lm(Slope~.,RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="New"|colnames(RulesDF)=="Slope"])
+summary(LMrulesNew)
+
+#Random Library
+LMrulesOldRandom=lm(Slope~.,RandomTrainDF[,str_sub(colnames(RandomTrainDF),-3,-1)=="Old"|
+                                           colnames(RandomTrainDF)=="Slope"])
+summary(LMrulesOldRandom)
+LMrulesNewRandom=lm(Slope~.,RandomTrainDF[,str_sub(colnames(RandomTrainDF),-3,-1)=="New"|
+                                            colnames(RandomTrainDF)=="Slope"])
+summary(LMrulesNewRandom)
+
+
+##Results
+#Linear Regression
+LMdataframe=data.frame(Rules=c("Redundancy (1)","Charge (2)","Balance (3)","Position (4)","Clustering (5)"),
+                       Rules_Lib_Old=LMrulesOld$coefficients[-1],
+                       Rules_Lib_New=LMrulesNew$coefficients[-1],
+                       Random_Lib_Old=LMrulesOldRandom$coefficients[-1],
+                       Random_Lib_New=LMrulesNewRandom$coefficients[-1])
+LMdataframe[,-1]=round(LMdataframe[,-1],3)
+write.csv(LMdataframe,"Regressions/LMdataframe.csv",row.names = FALSE,quote = FALSE)
+
+#Lasso Model AUCs
+AUCdf=data.frame(Library=c(rep("Random",2),rep("Designed",2),rep("Natural",2)),
+                 RulesVersion=c("Old","New","Old","New","Old","New"),
+                 AUC=c(0.783,0.875,0.915,0.944,0.630,0.738))
+ggplot(AUCdf,aes(AUC,Library,group = factor(RulesVersion,levels = c("New","Old"))))+
+  geom_col(aes(fill = factor(RulesVersion,levels = c("New","Old"))),position = position_dodge2(),colour = "black",linewidth = 0.5)+
+  scale_fill_manual(name = "Rules\nVersion",values = c("red3","blue3"),breaks = c("Old","New"))+
+  scale_y_discrete(limits=c("Natural","Random","Designed"),labels=c("Natural\nLibrary","Random\nLibrary","Designed\nLibrary"))+
+  coord_cartesian(xlim=c(0.5,1))+
+  geom_label(aes(label = AUC),position = position_dodge2(width = 0.9),hjust=1.4)+
+  ylab("")+
+  theme_classic()+
+  theme(axis.text = element_text(size=12,face = "bold",color="black"),
+        axis.title = element_text(size=14,face = "bold"),
+        legend.text = element_text(size=10,color="black"),
+        legend.title = element_text(size=10,face="bold"),
+        legend.position = c(0.9,0.25))
+ggsave("Figures/RulesLassoAUC.png",height = 3,width = 4)
+
+```
+
+```{r Rule Category Representation}
+TempRulesDF=RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="Old"]
+TempRulesDF$Group=paste(TempRulesDF$RuleRedundancyOld,
+                        TempRulesDF$RuleChargeOld,
+                        TempRulesDF$RuleBalanceOld,
+                        TempRulesDF$RulePositionOld,
+                        TempRulesDF$RuleClusterOld,sep = "-")
+table(TempRulesDF$Group)
+
+P1=ggplot(TempRulesDF)+
+  geom_bar(aes(x=Group))+
+  theme_classic()+
+  #scale_y_continuous(trans='log10')+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+TempRulesDF2=RulesDF[,str_sub(colnames(RulesDF),-3,-1)=="New"]
+TempRulesDF2=as.data.frame(TempRulesDF2>=0.5)
+TempRulesDF2$Group=paste(as.numeric(TempRulesDF2$RuleRedundancyNew),
+                        as.numeric(TempRulesDF2$RuleChargeNew),
+                        as.numeric(TempRulesDF2$RuleBalanceNew),
+                        as.numeric(TempRulesDF2$RulePositionNew),
+                        as.numeric(TempRulesDF2$RuleClusterNew),sep = "-")
+table(TempRulesDF2$Group)
+
+P2=ggplot(TempRulesDF2)+
+  geom_bar(aes(x=Group))+
+  theme_classic()+
+  scale_y_continuous(trans='log10')+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+TempTrainDF=RandomTrainDF[,str_sub(colnames(RandomTrainDF),-3,-1)=="Old"]
+TempTrainDF$Group=paste(TempTrainDF$RuleRedundancyOld,
+                        TempTrainDF$RuleChargeOld,
+                        TempTrainDF$RuleBalanceOld,
+                        TempTrainDF$RulePositionOld,
+                        TempTrainDF$RuleClusterOld,sep = "-")
+table(TempTrainDF$Group)
+
+P3=ggplot(TempTrainDF)+
+  geom_bar(aes(x=Group))+
+  theme_classic()+
+  scale_y_continuous(trans='log10')+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+TempTrainDF2=RandomTrainDF[,str_sub(colnames(RandomTrainDF),-3,-1)=="New"]
+TempTrainDF2=as.data.frame(TempTrainDF2>=0.5)
+TempTrainDF2$Group=paste(as.numeric(TempTrainDF2$RuleRedundancyNew),
+                        as.numeric(TempTrainDF2$RuleChargeNew),
+                        as.numeric(TempTrainDF2$RuleBalanceNew),
+                        as.numeric(TempTrainDF2$RulePositionNew),
+                        as.numeric(TempTrainDF2$RuleClusterNew),sep = "-")
+table(TempTrainDF2$Group)
+
+P4=ggplot(TempTrainDF2)+
+  geom_bar(aes(x=Group))+
+  theme_classic()+
+  scale_y_continuous(trans='log10')+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+TempTrainDFnat=NaturalTrainDF[,str_sub(colnames(NaturalTrainDF),-3,-1)=="Old"]
+TempTrainDFnat$Group=paste(TempTrainDFnat$RuleRedundancyOld,
+                        TempTrainDFnat$RuleChargeOld,
+                        TempTrainDFnat$RuleBalanceOld,
+                        TempTrainDFnat$RulePositionOld,
+                        TempTrainDFnat$RuleClusterOld,sep = "-")
+table(TempTrainDFnat$Group)
+
+P5=ggplot(TempTrainDFnat)+
+  geom_bar(aes(x=Group))+
+  theme_classic()+
+  scale_y_continuous(trans='log10')+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+TempTrainDFnat2=NaturalTrainDF[,str_sub(colnames(NaturalTrainDF),-3,-1)=="New"]
+TempTrainDFnat2=as.data.frame(TempTrainDFnat2>=0.5)
+TempTrainDFnat2$Group=paste(as.numeric(TempTrainDFnat2$RuleRedundancyNew),
+                        as.numeric(TempTrainDFnat2$RuleChargeNew),
+                        as.numeric(TempTrainDFnat2$RuleBalanceNew),
+                        as.numeric(TempTrainDFnat2$RulePositionNew),
+                        as.numeric(TempTrainDFnat2$RuleClusterNew),sep = "-")
+table(TempTrainDFnat2$Group)
+
+P6=ggplot(TempTrainDFnat2)+
+  geom_bar(aes(x=Group))+
+  theme_classic()+
+  scale_y_continuous(trans='log10')+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+P=(P1+P2)/(P3+P4)/(P5+P6)
+ggsave("GroupCounts.png",P,width = 10,height = 13)
+
+##Frequency of sequences that follow each rule
+colSums(TempRulesDF[,-6])/nrow(TempRulesDF)
+colSums(TempRulesDF2[,-6])/nrow(TempRulesDF2)
+colSums(TempTrainDF[,-6])/nrow(TempTrainDF)
+colSums(TempTrainDF2[,-6])/nrow(TempTrainDF2)
+colSums(TempTrainDFnat[,-6])/nrow(TempTrainDFnat)
+colSums(TempTrainDFnat2[,-6])/nrow(TempTrainDFnat2)
+
+```
+
+## Redundancy
+
+What are the requirements for number of aromatic and acidic residues?
+
+```{r W & D Redundancy}
+#All combinations of W and D counts w/o R
+WDdf=filter(RedundantFData,Rcount==0 & !is.na(SlopeFinal200))%>%
+  dplyr::select(WCount=Wcount,DCount=Dcount,Slope=SlopeFinal200)%>%
+  mutate(Function=Slope>0)
+
+WDcondensedDF=group_by(WDdf,WCount,DCount)%>%summarise(AvgSlope=mean(Slope))
+
+#W Count boxplot
+P1=ggplot(WDcondensedDF)+
+  geom_tile(aes(x=WCount,y=DCount,fill = AvgSlope))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
+  geom_segment(aes(x = 3.5, y = 3.5, xend = 3.5, yend = 15.5),colour = "yellow",linewidth = 1.5)+
+  geom_segment(aes(x = 3.5, y = 3.5, xend = 14.5, yend = 3.5),colour = "yellow",linewidth = 1.5)+
+  #coord_fixed()+
+  theme_classic()+
+  scale_y_reverse(breaks = 1:15)+
+  scale_x_continuous(breaks = 1:14,position = "top")+  
+  ylab("Number of D Residues")+
+  xlab("Number of W Residues")+
+  theme(legend.position = c(0.86,0.23),
+        legend.background = element_rect(fill="black"),
+        legend.text = element_text(size=8,color="white"),
+        legend.title = element_text(size=10,color="white"),        
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        panel.background = element_rect(fill = "black"))
+
+P2=ggplot(WDdf[WDdf$WCount!=14,],aes(x=WCount,y=Slope,group=WCount))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_point(size=2,aes(x=WCount,y=Slope),data = WDdf[WDdf$WCount==14,])+
+  scale_x_continuous(breaks = 1:14)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Number of W Residues")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+P3=ggplot(WDdf[WDdf$DCount!=13 & WDdf$DCount!=14,],aes(x=DCount,y=Slope,group=DCount))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_point(size=2,aes(x=DCount,y=Slope),data = WDdf[WDdf$DCount==13 | WDdf$DCount==14,])+
+  scale_x_continuous(breaks = 1:15)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Number of D Residues")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+layout="
+AAABBB#
+CCCCDDD"
+
+P=wrap_plots(A=P1,B=P2,C=P3,D=P4,design = layout)
+ggsave("Figures/Set1Substitutions.png",P,width = 12,height = 10)
+
+
+layout="
+#AA#
+####
+BBCC"
+
+P=wrap_plots(A=P1,B=P2,C=P3,design = layout,widths = c(5,4.5,5.5),heights = c(5,0.5,4.5))
+ggsave("Figures/WandDcount.png",P,width = 10,height = 10)
+
+#Balanced WD graph
+BalWDdf=filter(WDdf,WCount==DCount)
+ggplot(BalWDdf,aes(x=factor(WCount),y=Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=0.5,width = 0.3)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Number of WD")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+ggsave("Figures/WDredundancy.png",width = 5,height = 5)
+
+```
+
+## Basics and Charge
+
+What are the limitations on presence of basic residues?
+
+```{r R and Net Charge}
+#All combinations of R and 4-8 W and 4-8 D
+WDRdf=filter(RedundantFData,!is.na(SlopeFinal200) & Wcount %in% 4:8 & Dcount %in% 4:8)%>%
+  dplyr::select(RCount=Rcount,WCount=Wcount,DCount=Dcount,Slope=SlopeFinal200)%>%
+  mutate(Function=Slope>0)
+
+P1=ggplot(WDRdf[WDRdf$RCount!=10,],aes(x=RCount,y=Slope,group=RCount))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_point(size=2,aes(x=RCount,y=Slope),data = WDRdf[WDRdf$RCount==10,])+
+  scale_x_continuous(breaks = 0:10)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Number of R Residues")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+P2=filter(RulesFData,!is.na(SlopeFinal200) & Wcount>0)%>%
+  ggplot()+
+  geom_tile(aes(x=Charge,y=Wcount,fill = SlopeFinal200))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
+  geom_segment(aes(x = -2.5, y = 3.5, xend = -2.5, yend = 14.5),colour = "yellow",linewidth = 1.5)+
+  geom_segment(aes(x = -2.5, y = 3.5, xend = -15.5, yend = 3.5),colour = "yellow",linewidth = 1.5)+
+  theme_classic()+
+  scale_y_continuous(breaks = 1:14)+
+  scale_x_continuous(breaks = seq(-14,10,2))+  
+  ylab("Number of W Residues")+
+  xlab("Net Charge")+
+  theme(legend.position = c(0.8,0.9),
+        legend.direction = "horizontal",
+        legend.background = element_rect(fill="black"),
+        legend.text = element_text(size=10,color="white"),
+        legend.title = element_text(size=12,color="white"),        
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        panel.background = element_rect(fill = "black"))
+
+P=P1+P2+plot_layout(widths = c(4, 7))
+ggsave("Figures/WDRcharge.png",P,width = 11,height = 5)          
+
+filter(RulesFData,!is.na(SlopeFinal200) & Wcount>0)%>%
+  ggplot()+
+  geom_tile(aes(x=Charge,y=Rcount,fill = SlopeFinal200))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
+  theme_classic()+
+  scale_y_continuous(breaks = 1:14)+
+  scale_x_continuous(breaks = seq(-14,10,2))+  
+  ylab("Number of R Residues")+
+  xlab("Net Charge")+
+  theme(legend.position = c(0.2,0.9),
+        legend.direction = "horizontal",
+        legend.background = element_rect(fill="black"),
+        legend.text = element_text(size=10,color="white"),
+        legend.title = element_text(size=12,color="white"),        
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        panel.background = element_rect(fill = "black"))
+
+```
+
+## Proline
+
+Can proline residues substitute for acidic residues?
+
+```{r Proline and Acidics}
+ProlineFdata=fData(FilteredEset[str_sub(FilteredEset@featureData@data$set,1,11)=="wp-template"&!is.na(FilteredEset@featureData@data$SlopeFinal200),])
+ProlineFdata$Pcount=nchar(ProlineFdata$aa_seq)-nchar(gsub("P","",ProlineFdata$aa_seq))
+ProlineFdata$Group=paste("W",ProlineFdata$Wcount,"P",ProlineFdata$Pcount,"D",ProlineFdata$Dcount,sep = "")
+ProlineFdata$Spacing=as.numeric(gsub("spread","",str_split_fixed(ProlineFdata$set,"-",4)[,4]))
+ProlineFdata$Spacing[is.na(ProlineFdata$Spacing)]=0
+
+MaxAcidicPos=c()
+for (Seq in ProlineFdata$aa_seq) {
+  SeqVec=str_split(Seq,"")%>%unlist
+  i=0
+  j=0
+  TempMax=c()
+  for (position in SeqVec) {
+    i=i+1
+    if (grepl("D",position)) {
+      TempMax=c(TempMax,i)
+      j=j+1
+    }
+  }
+  if (j==0) {
+    TempMax=0
+  }
+  MaxAcidicPos=c(MaxAcidicPos,max(TempMax))
+}
+
+MinAroPos=c()
+for (Seq in ProlineFdata$aa_seq) {
+  SeqVec=str_split(Seq,"")%>%unlist
+  i=0
+  j=0
+  TempMin=c()
+  for (position in SeqVec) {
+    i=i+1
+    if (grepl("W",position)) {
+      TempMin=c(TempMin,i)
+      j=j+1
+    }
+  }
+  if (j==0) {
+    TempMin=0
+  }
+  MinAroPos=c(MinAroPos,min(TempMin))
+}
+ProlineFdata$SepSpacing=MinAroPos-MaxAcidicPos-2
+
+#Number of D residues in PWPW (2 W) template sequences
+P1=filter(ProlineFdata, Wcount==2)%>%
+ggplot(aes(x=as.factor(Dcount),y=SlopeFinal200))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+  
+  theme_classic()+
+  labs(title = expression(G["16"]*PWPW))+
+  ylab("Slope")+
+  xlab("Number of D Residues")+
+  scale_x_discrete(labels=c(0:6))+
+  coord_cartesian(ylim=c(-6,4))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        plot.title = element_text(size=16,color="black",vjust = -6,hjust=0.05))
+
+#Number of D residues in PWPWPW (3 W) template sequences
+P2=filter(ProlineFdata, Wcount==3)%>%
+ggplot(aes(x=as.factor(Dcount),y=SlopeFinal200))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+  
+  theme_classic()+
+  labs(title = expression(G["14"]*PWPWPW))+
+  ylab("Slope")+
+  xlab("Number of D Residues")+
+  scale_x_discrete(labels=c(0:6))+
+  coord_cartesian(ylim=c(-6,4))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        plot.title = element_text(size=16,color="black",vjust = -6,hjust=0.05))
+
+#Space from D residues to PWPWPW in balanced sequences
+P3=filter(ProlineFdata,!is.na(Spacing)&Wcount==3&Dcount==3)%>%
+ggplot(aes(x=SepSpacing,y=SlopeFinal200))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  geom_jitter(size=2,height = 0, width = 0.1)+  
+  geom_smooth(method = "lm", colour = "blue", linewidth=2, se = FALSE)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Space Between Nearest D and PWPWPW")+
+  scale_x_continuous(labels = 0:11,breaks = 0:11)+
+  coord_cartesian(ylim=c(-6,4))+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+P=P1+P2+P3+plot_layout(widths = c(3,3,5))
+ggsave("Figures/ProlineTemplate.png",P,width = 11,height = 5)     
+
+#Space between D residues in balanced sequences
+filter(ProlineFdata,!is.na(Spacing)&Wcount==3&Dcount==3&Spacing<4)%>%
+ggplot(aes(x=as.factor(Spacing),y=SlopeFinal200))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=2,width = 0.3)+  
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Space Between D Residues")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+```
+
+## Balance, Avg Position, Clustering
+
+How do minor balance, position, and clustering rules influence function?
+
+```{r Balance, Position, and Clustering}
+#Deviation from Balance
+P1=ggplot(Balancedf[Balancedf$BalDev<8,],aes(x=factor(BalDev),y=Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Deviation from Balance")+
+  scale_y_continuous(breaks = seq(-10,6,2))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  geom_vline(xintercept = 1.5,color="yellow2",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+#Position
+Balancedf$PosDev=with(Balancedf,ifelse(PositionDev<9,0,PositionDev-8))
+P2=ggplot(Balancedf,aes(x=factor(PosDev),y=Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Deviation from C-Terminal Position")+
+  scale_y_continuous(breaks = seq(-10,6,2))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  geom_vline(xintercept = 1.5,color="yellow2",linewidth=1.2)+  
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+P3=Balancedf%>%filter(AroCluster<7&AroCluster>1)%>%
+ggplot(aes(x=factor(AroCluster),y=Slope,fill=factor(Flanked)))+
+  geom_boxplot(position=position_dodge(width = 0.85),alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_point(size=1.1,position = position_jitterdodge(jitter.width = 0.3,dodge.width = 0.85))+   
+  scale_fill_manual(name="Flanked?",values = c("red3","blue3"),labels = c("No","Yes"))+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Largest W Cluster")+
+  scale_y_continuous(breaks = seq(-10,6,2))+  
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.text = element_text(size=10,color="black"),
+        legend.title = element_text(size=12,color="black"), 
+        legend.position = c(0.12,0.15))
+
+P=P1+P2+P3+plot_layout(widths = c(4,4,5))
+ggsave("Figures/RulesDeviation.png",P,width = 12,height = 5) 
+
+#Largest Aromatic Cluster
+ggplot(Balancedf)+
+  geom_boxplot(aes(x=factor(AroCluster),y=Slope))+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Largest W Cluster")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+table(Balancedf$WCluster)
+
+#Deviation from Cluster Rule
+Balancedf$NeighborDev=with(Balancedf,ifelse(NeighborRatio<0.5,0,NeighborRatio-0.5))
+ggplot(Balancedf,aes(x=factor(round(NeighborDev,digits = 2)+0.5),y=Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=0.5,width = 0.3)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Deviation from No Clustering")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  geom_vline(xintercept = 1.5,color="yellow2",linewidth=1.2)+ 
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+```
+
+## Set 32 Substitutions
+
+Set 32 (renamed to Set 1) Substitutions:
+  all means all
+  some means half
+How do other amino acid residues influence the function of functional WDG containing sequences?
+
+```{r Functional Set Substitutions}
+##All Set32 Substitutions
+Set32varFdata=fData(FilteredEset[str_sub(FilteredEset@featureData@data$set,1,5)=="set32"|
+                    str_sub(FilteredEset@featureData@data$set,1,3)=="all"|
+                    str_sub(FilteredEset@featureData@data$set,1,4)=="some",])
+Set32varFdata=filter(Set32varFdata,!is.na(SlopeFinal200))
+Set32varFdata$set=as.factor(Set32varFdata$set)
+Set32varFdata$SubCount=nchar(gsub("W|D|G","",Set32varFdata$aa_seq))
+Set32varFdata$Template=gsub("[^GWD]","X",Set32varFdata$aa_seq)
+ReorderSets=levels(Set32varFdata$set)[c(5,1:4,6,18:20,7:17)]
+Set32GsubsFdata=Set32varFdata[str_sub(Set32varFdata$set,1,6)=="some_G",c(1,2,3,43,50,51)]
+Set32GsubsFdata$Template=paste0(Set32GsubsFdata$Template,"-",Set32GsubsFdata$SubCount)
+
+#W and D substitutions
+P1=ggplot(Set32varFdata[Set32varFdata$set %in% ReorderSets[1:9],],aes(x=set,y=SlopeFinal200))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+ 
+  theme_classic()+
+  ylab("Slope")+
+  xlab("")+
+  scale_y_continuous(breaks = seq(-8,6,2),limits = c(-8,6))+
+  scale_x_discrete(limits=ReorderSets[c(1,6,2,7,3,8,4,9,5)],
+                   labels=c("Set 1","D->E (half)","D->E (all)","W->F (half)","W->F (all)",
+                            "W->L (half)","W->L (all)","W->Y (half)","W->Y (all)"))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"))
+
+#G substitutions
+P2=ggplot(Set32varFdata[Set32varFdata$set %in% ReorderSets[c(1,10:20)],],aes(x=fct_reorder(set,desc(SlopeFinal200)),y=SlopeFinal200))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+ 
+  theme_classic()+
+  ylab("Slope")+
+  xlab("")+
+  scale_y_continuous(breaks = seq(-8,6,2),limits = c(-8,6))+
+  scale_x_discrete(labels=c("G->L (half)","G->M (half)","G->V (half)","G->A (half)","Set 1","G->T (half)","G->P (half)",
+                            "G->I (half)","G->Q (half)","G->C (half)","G->N (half)","G->S (half)"))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"))
+
+##Hydrophobics
+HydrophobicDF=Set32varFdata[Set32varFdata$set %in% c("some_G_to_I","some_G_to_V","some_G_to_L","some_G_to_M","some_G_to_A"),c(1,2,3,43)]
+HydrophobicDF$Count=nchar(HydrophobicDF$aa_seq)-nchar(gsub("[^WDG]","",HydrophobicDF$aa_seq))
+HydroNames=c(some_G_to_A="G->A (half)",
+             some_G_to_I="G->I (half)",
+             some_G_to_L="G->L (half)",
+             some_G_to_M="G->M (half)",
+             some_G_to_V="G->V (half)")
+
+#Number of substitutions
+P3=ggplot(HydrophobicDF[HydrophobicDF$Count!=1 & HydrophobicDF$index!=7883,],aes(x=as.factor(Count),y=SlopeFinal200))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_point(size=2,aes(x=as.factor(Count),y=SlopeFinal200),data = HydrophobicDF[HydrophobicDF$index==7883,])+
+  facet_wrap(~set,nrow = 1,labeller = as_labeller(HydroNames))+  
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Number of Substitutions")+
+  scale_y_continuous(breaks = seq(-8,6,2),limits = c(-8,6))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        strip.text = element_text(size=14,color="black"))
+
+#Clustering
+NeighborRatio=c()
+for (Seq in HydrophobicDF$aa_seq) {
+  Wgroups=unlist(strsplit(gsub("[^WFYIAMLV]","X",Seq),"X+"))
+  Temp=c()
+  for (group in 1:length(Wgroups)) {
+    if (nchar(Wgroups[group])<=1) {
+      Temp=c(Temp,0)
+    }
+    if (nchar(Wgroups[group])>1) {
+      Temp=c(Temp,rep(0.5,2),rep(1,nchar(Wgroups[group])-2))
+    }
+  }
+  NeighborRatio=c(NeighborRatio,mean(Temp))
+}
+HydrophobicDF$RuleCluster=NeighborRatio
+
+P4=ggplot(HydrophobicDF,aes(x=RuleCluster,y=SlopeFinal200,color = set))+
+  geom_jitter(size=3,width = 0.005,height = 0)+
+  geom_smooth(linewidth=2,method = "lm",se = FALSE)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Cluster Score")+
+  scale_y_continuous(breaks = seq(-8,6,2),limits = c(-8,6))+
+  scale_color_manual(name="Substitution\n(Pearson r)",values = c("#780116","#F7B538","#DB7C26","#D8572A","#C32F27"),
+                     labels = c("A (-0.25)","I (-0.41)","L (-0.32)","M (-0.27)","V (-0.35)"),
+                     breaks = c("some_G_to_A","some_G_to_I","some_G_to_L","some_G_to_M","some_G_to_V"))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(legend.position = c(0.12,0.25),
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.text = element_text(size=10,color="black"),
+        legend.title = element_text(size=12,color="black"),
+        legend.background = element_rect(fill=NA))
+
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_A",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_A",]$RuleCluster,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_I",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_I",]$RuleCluster,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_L",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_L",]$RuleCluster,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_M",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_M",]$RuleCluster,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_V",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_V",]$RuleCluster,method = "pearson")
+
+layout="
+AAABBB#
+CCCCDDD"
+
+P=wrap_plots(A=P1,B=P2,C=P3,D=P4,design = layout)
+ggsave("Figures/Set1Substitutions.png",P,width = 12,height = 10)
+
+```
+
+```{r Substitution Position Effect}
+#Calculate Avg Position
+AvgPos=c()
+for (Seq in HydrophobicDF$aa_seq) {
+  SeqVec=str_split(Seq,"")%>%unlist
+  i=0
+  Temp=c()
+  for (position in SeqVec) {
+    i=i+1
+    if (grepl("[AILMV]",position)) {
+      Temp=c(Temp,i)
+    }
+  } 
+  AvgPos=c(AvgPos,round(mean(Temp)))
+}
+HydrophobicDF$AvgPos=AvgPos
+
+ggplot(HydrophobicDF,aes(x=AvgPos,y=SlopeFinal200,color = set))+
+  geom_jitter(size=3,width = 0.005,height = 0)+
+  geom_smooth(linewidth=2,method = "lm",se = FALSE)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Mean Position of Substitutions")+
+  scale_y_continuous(breaks = seq(-8,6,2),limits = c(-8,6))+
+  scale_color_manual(name="Substitution\n(Pearson r)",values = c("#780116","#F7B538","#DB7C26","#D8572A","#C32F27"),
+                     labels = c("A (-0.26)","I (0.008)","L (-0.07)","M (-0.14)","V (0.001)"),
+                     breaks = c("some_G_to_A","some_G_to_I","some_G_to_L","some_G_to_M","some_G_to_V"))+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(legend.position = c(0.12,0.25),
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.text = element_text(size=10,color="black"),
+        legend.title = element_text(size=12,color="black"),
+        legend.background = element_rect(fill=NA))
+
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_A",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_A",]$AvgPos,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_I",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_I",]$AvgPos,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_L",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_L",]$AvgPos,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_M",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_M",]$AvgPos,method = "pearson")
+cor(x=HydrophobicDF[HydrophobicDF$set=="some_G_to_V",]$SlopeFinal200,
+    y=HydrophobicDF[HydrophobicDF$set=="some_G_to_V",]$AvgPos,method = "pearson")
+
+```
+
+```{r Effect Across Substitutions}
+H=pivot_wider(Set32GsubsFdata[,c(3,4,6)],names_from = set,values_from = SlopeFinal200)
+H=H[order(H$some_G_to_I),]
+H2=as.matrix(H[,2:12])
+rownames(H2)=H$Template
+
+myColor=colorRampPalette(c("navy", "white", "red"))(50)
+Low=min(Set32GsubsFdata$SlopeFinal200,na.rm = TRUE)-0.1
+High=max(Set32GsubsFdata$SlopeFinal200,na.rm = TRUE)+0.1
+AllBreaks=c(seq(Low, 0, length.out=ceiling(50/2) + 1),seq(High/50, High, length.out=floor(50/2)))
+
+pheatmap(na.omit(H2[,c(1,2,3,4,5)]),na_col = "black",
+         cluster_rows = TRUE,cluster_cols = TRUE,
+         show_rownames = TRUE,color=myColor, breaks=AllBreaks)
+
+pheatmap(H2[,c(1,2,3,4,5)],na_col = "black",
+         cluster_rows = FALSE,cluster_cols = FALSE,
+         show_rownames = TRUE,color=myColor, breaks=AllBreaks)
+
+pheatmap(H2[,c(1,2,3,4,5)],na_col = "black",
+         cluster_rows = FALSE,cluster_cols = FALSE,
+         show_rownames = TRUE,color=c("yellow","blue"), breaks=c(-7,0,6))
+
+pheatmap(H2[str_sub(rownames(H2),22,22)=="4"|str_sub(rownames(H2),22,22)=="5",],na_col = "black",
+         cluster_rows = FALSE,cluster_cols = FALSE,
+         show_rownames = TRUE,color=myColor, breaks=AllBreaks)
+
+pheatmap(H2[str_sub(rownames(H2),22,22)=="2"|str_sub(rownames(H2),22,22)=="3",],na_col = "black",
+         cluster_rows = FALSE,cluster_cols = FALSE,
+         show_rownames = TRUE,color=myColor, breaks=AllBreaks)
+
+ggplot(Set32GsubsFdata)+
+  geom_tile(aes(x=set,y=Template,fill = SlopeFinal200))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
+  theme_classic()+
+  #scale_y_continuous(breaks = 1:14)+
+  #scale_x_continuous(breaks = seq(-14,10,2))+  
+  ylab("Number of W Residues")+
+  xlab("Total Charge")+
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill="black"),
+        legend.text = element_text(size=8,color="white"),
+        legend.title = element_text(size=10,color="white"),        
+        axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        panel.background = element_rect(fill = "black"))
+
+```
+
+## Rule Cutoffs for Regression
+
+Use the data from the rules set to fit modified rules.
+
+```{r Rule Cutoffs for Regression}
+#Redundancy
+ggplot(RulesDF[RulesDF$R==0,],aes(as.factor(Redundancy),Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Redundancy")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+#Charge
+ggplot(RulesDF[RulesDF$BalDev<3 & RulesDF$W>0,],aes(as.factor(Charge),Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Net Charge")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+#Balance
+ggplot(Balancedf,aes(factor(BalDev),Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Deviation from Balance")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+#Position
+ggplot(Balancedf,aes(as.factor(20-AvgPosition),Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Average Position Distance from C-term.")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+#Clustering
+ggplot(Balancedf,aes(as.factor(round(NeighborRatio,1)),Slope))+
+  geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
+  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  theme_classic()+
+  ylab("Slope")+
+  xlab("Aromatic Neighbor Ratio")+
+  geom_hline(yintercept = 0,color="red",linewidth=1.2)+
+  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+
+```
