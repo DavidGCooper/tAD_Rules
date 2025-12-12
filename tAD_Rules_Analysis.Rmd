@@ -184,13 +184,22 @@ RulesTable=RulesTable%>%mutate(NewRule=recode(NewRule,
                                    "Rule5"="Rule6",
                                    "Rule6"="Rule5"))
 
-P1=ggplot(RulesFData)+
-  geom_boxplot(aes(x=set,y=SlopeFinal200))+
+
+RulesFData_summary=RulesFData %>%
+  group_by(set) %>%
+  mutate(mean_value = mean(SlopeFinal200))
+
+P1=ggplot(RulesFData_summary)+
+  geom_boxplot(aes(x=set,y=SlopeFinal200,fill=mean_value))+
   theme_classic()+
   ylab("Slope")+
   xlab("")+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+  
-  theme(axis.text.x = element_blank(),axis.text = element_text(size=14),axis.title.y = element_text(size=16,vjust = -4))
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
+  theme(axis.text.x = element_blank(),
+        axis.text = element_text(size=14),
+        axis.title.y = element_text(size=16,vjust = -4),
+        legend.position = "none")
 
 P2=ggplot(RulesTable)+
   geom_tile(aes(x=set,y=NewRule,fill=Value))+
@@ -392,7 +401,7 @@ AUCdf=data.frame(Library=c(rep("Random",2),rep("Designed",2),rep("Natural",2)),
                  AUC=c(0.783,0.875,0.915,0.944,0.630,0.738))
 ggplot(AUCdf,aes(AUC,Library,group = factor(RulesVersion,levels = c("New","Old"))))+
   geom_col(aes(fill = factor(RulesVersion,levels = c("New","Old"))),position = position_dodge2(),colour = "black",linewidth = 0.5)+
-  scale_fill_manual(name = "Rules\nVersion",values = c("red3","blue3"),breaks = c("Old","New"))+
+  scale_fill_manual(name = "Rules\nVersion",values = c("green3","purple3"),breaks = c("Old","New"))+
   scale_y_discrete(limits=c("Natural","Random","Designed"),labels=c("Natural\nLibrary","Random\nLibrary","Designed\nLibrary"))+
   coord_cartesian(xlim=c(0.5,1))+
   geom_label(aes(label = AUC),position = position_dodge2(width = 0.9),hjust=1.4)+
@@ -524,8 +533,8 @@ WDcondensedDF=group_by(WDdf,WCount,DCount)%>%summarise(AvgSlope=mean(Slope))
 P1=ggplot(WDcondensedDF)+
   geom_tile(aes(x=WCount,y=DCount,fill = AvgSlope))+
   scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
-  geom_segment(aes(x = 3.5, y = 3.5, xend = 3.5, yend = 15.5),colour = "yellow",linewidth = 1.5)+
-  geom_segment(aes(x = 3.5, y = 3.5, xend = 14.5, yend = 3.5),colour = "yellow",linewidth = 1.5)+
+  #geom_segment(aes(x = 3.5, y = 3.5, xend = 3.5, yend = 15.5),colour = "yellow",linewidth = 1.5)+
+  #geom_segment(aes(x = 3.5, y = 3.5, xend = 14.5, yend = 3.5),colour = "yellow",linewidth = 1.5)+
   #coord_fixed()+
   theme_classic()+
   scale_y_reverse(breaks = 1:15)+
@@ -540,54 +549,63 @@ P1=ggplot(WDcondensedDF)+
         axis.title = element_text(size=16,color="black"),
         panel.background = element_rect(fill = "black"))
 
-P2=ggplot(WDdf[WDdf$WCount!=14,],aes(x=WCount,y=Slope,group=WCount))+
+WDdfp2=WDdf %>%
+  group_by(WCount) %>%
+  mutate(mean_value = mean(Slope))
+
+#WDdf[WDdf$WCount!=14,]
+P2=ggplot(WDdfp2[WDdfp2$WCount!=14,],aes(x=WCount,y=Slope,group=WCount,fill = mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+
-  geom_point(size=2,aes(x=WCount,y=Slope),data = WDdf[WDdf$WCount==14,])+
+  geom_jitter(size=0.6,width = 0.3,height = 0)+
+  geom_point(size=2,aes(x=WCount,y=Slope),data = WDdfp2[WDdfp2$WCount==14,])+
   scale_x_continuous(breaks = 1:14)+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+  
   theme_classic()+
   ylab("Slope")+
   xlab("Number of W Residues")+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
-  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 
-P3=ggplot(WDdf[WDdf$DCount!=13 & WDdf$DCount!=14,],aes(x=DCount,y=Slope,group=DCount))+
+WDdfp3=WDdf %>%
+  group_by(DCount) %>%
+  mutate(mean_value = mean(Slope))
+
+P3=ggplot(WDdfp3[WDdfp3$DCount!=13 & WDdfp3$DCount!=14,],aes(x=DCount,y=Slope,group=DCount,fill=mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+
-  geom_point(size=2,aes(x=DCount,y=Slope),data = WDdf[WDdf$DCount==13 | WDdf$DCount==14,])+
+  geom_jitter(size=0.6,width = 0.3,height = 0)+
+  geom_point(size=2,aes(x=DCount,y=Slope),data = WDdfp3[WDdfp3$DCount==13 | WDdfp3$DCount==14,])+
   scale_x_continuous(breaks = 1:15)+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+ 
   theme_classic()+
   ylab("Slope")+
   xlab("Number of D Residues")+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
-  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 
-layout="
-AAABBB#
-CCCCDDD"
-
-P=wrap_plots(A=P1,B=P2,C=P3,D=P4,design = layout)
-ggsave("Figures/Set1Substitutions.png",P,width = 12,height = 10)
-
-
-layout="
-#AA#
-####
-BBCC"
-
-P=wrap_plots(A=P1,B=P2,C=P3,design = layout,widths = c(5,4.5,5.5),heights = c(5,0.5,4.5))
-ggsave("Figures/WandDcount.png",P,width = 10,height = 10)
+P=P1+P2+P3+plot_layout(widths = c(4,4,4))
+ggsave("Figures/WandDcount.png",P,width = 12,height = 4.8) 
 
 #Balanced WD graph
 BalWDdf=filter(WDdf,WCount==DCount)
-ggplot(BalWDdf,aes(x=factor(WCount),y=Slope))+
+BalWDdf=BalWDdf %>%
+  group_by(WCount) %>%
+  mutate(mean_value = mean(Slope))
+
+ggplot(BalWDdf,aes(x=factor(WCount),y=Slope,fill=mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=0.5,width = 0.3)+
+  geom_jitter(size=0.6,width = 0.3,height = 0)+
   theme_classic()+
   ylab("Slope")+
   xlab("Number of WD")+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
-  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+   
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 ggsave("Figures/WDredundancy.png",width = 5,height = 5)
 
 ```
@@ -602,23 +620,30 @@ WDRdf=filter(RedundantFData,!is.na(SlopeFinal200) & Wcount %in% 4:8 & Dcount %in
   dplyr::select(RCount=Rcount,WCount=Wcount,DCount=Dcount,Slope=SlopeFinal200)%>%
   mutate(Function=Slope>0)
 
-P1=ggplot(WDRdf[WDRdf$RCount!=10,],aes(x=RCount,y=Slope,group=RCount))+
+WDRdf=WDRdf %>%
+  group_by(RCount) %>%
+  mutate(mean_value = mean(Slope))
+
+P1=ggplot(WDRdf[WDRdf$RCount!=10,],aes(x=RCount,y=Slope,group=RCount,fill = mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_jitter(size=0.6,width = 0.3,height = 0)+
   geom_point(size=2,aes(x=RCount,y=Slope),data = WDRdf[WDRdf$RCount==10,])+
   scale_x_continuous(breaks = 0:10)+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+ 
   theme_classic()+
   ylab("Slope")+
   xlab("Number of R Residues")+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
-  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 
 P2=filter(RulesFData,!is.na(SlopeFinal200) & Wcount>0)%>%
   ggplot()+
   geom_tile(aes(x=Charge,y=Wcount,fill = SlopeFinal200))+
   scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
-  geom_segment(aes(x = -2.5, y = 3.5, xend = -2.5, yend = 14.5),colour = "yellow",linewidth = 1.5)+
-  geom_segment(aes(x = -2.5, y = 3.5, xend = -15.5, yend = 3.5),colour = "yellow",linewidth = 1.5)+
+  #geom_segment(aes(x = -2.5, y = 3.5, xend = -2.5, yend = 14.5),colour = "yellow",linewidth = 1.5)+
+  #geom_segment(aes(x = -2.5, y = 3.5, xend = -15.5, yend = 3.5),colour = "yellow",linewidth = 1.5)+
   theme_classic()+
   scale_y_continuous(breaks = 1:14)+
   scale_x_continuous(breaks = seq(-14,10,2))+  
@@ -634,7 +659,7 @@ P2=filter(RulesFData,!is.na(SlopeFinal200) & Wcount>0)%>%
         panel.background = element_rect(fill = "black"))
 
 P=P1+P2+plot_layout(widths = c(4, 7))
-ggsave("Figures/WDRcharge.png",P,width = 11,height = 5)          
+ggsave("Figures/WDRcharge.png",P,width = 11,height = 4.5)          
 
 filter(RulesFData,!is.na(SlopeFinal200) & Wcount>0)%>%
   ggplot()+
@@ -707,36 +732,46 @@ for (Seq in ProlineFdata$aa_seq) {
 ProlineFdata$SepSpacing=MinAroPos-MaxAcidicPos-2
 
 #Number of D residues in PWPW (2 W) template sequences
-P1=filter(ProlineFdata, Wcount==2)%>%
-ggplot(aes(x=as.factor(Dcount),y=SlopeFinal200))+
+ProlineP1=ProlineFdata[ProlineFdata$Wcount==2,] %>%
+  group_by(Dcount) %>%
+  mutate(mean_value = mean(SlopeFinal200))
+
+P1=ggplot(ProlineP1,aes(x=as.factor(Dcount),y=SlopeFinal200,fill=mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+  
+  geom_jitter(size=0.6,width = 0.3,height = 0)+  
   theme_classic()+
   labs(title = expression(G["16"]*PWPW))+
   ylab("Slope")+
   xlab("Number of D Residues")+
   scale_x_discrete(labels=c(0:6))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
   coord_cartesian(ylim=c(-6,4))+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   theme(axis.text = element_text(size=14,color="black"),
         axis.title = element_text(size=16,color="black"),
-        plot.title = element_text(size=16,color="black",vjust = -6,hjust=0.05))
+        plot.title = element_text(size=16,color="black",vjust = -6,hjust=0.05),
+        legend.position = "none")
 
 #Number of D residues in PWPWPW (3 W) template sequences
-P2=filter(ProlineFdata, Wcount==3)%>%
-ggplot(aes(x=as.factor(Dcount),y=SlopeFinal200))+
+ProlineP2=ProlineFdata[ProlineFdata$Wcount==3,] %>%
+  group_by(Dcount) %>%
+  mutate(mean_value = mean(SlopeFinal200))
+
+P2=ggplot(ProlineP2,aes(x=as.factor(Dcount),y=SlopeFinal200,fill=mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+  
+  geom_jitter(size=0.6,width = 0.3,height = 0)+  
   theme_classic()+
   labs(title = expression(G["14"]*PWPWPW))+
   ylab("Slope")+
   xlab("Number of D Residues")+
   scale_x_discrete(labels=c(0:6))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+    
   coord_cartesian(ylim=c(-6,4))+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   theme(axis.text = element_text(size=14,color="black"),
         axis.title = element_text(size=16,color="black"),
-        plot.title = element_text(size=16,color="black",vjust = -6,hjust=0.05))
+        plot.title = element_text(size=16,color="black",vjust = -6,hjust=0.05),
+        legend.position = "none")
 
 #Space from D residues to PWPWPW in balanced sequences
 P3=filter(ProlineFdata,!is.na(Spacing)&Wcount==3&Dcount==3)%>%
@@ -773,35 +808,55 @@ How do minor balance, position, and clustering rules influence function?
 
 ```{r Balance, Position, and Clustering}
 #Deviation from Balance
-P1=ggplot(Balancedf[Balancedf$BalDev<8,],aes(x=factor(BalDev),y=Slope))+
+Balp1=Balancedf[Balancedf$BalDev<8,] %>%
+  group_by(BalDev) %>%
+  mutate(mean_value = mean(Slope))
+
+P1=ggplot(Balp1,aes(x=factor(BalDev),y=Slope,fill = mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_jitter(size=0.6,width = 0.3,height = 0)+
   theme_classic()+
   ylab("Slope")+
   xlab("Deviation from Balance")+
   scale_y_continuous(breaks = seq(-10,6,2))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+  
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   geom_vline(xintercept = 1.5,color="yellow2",linewidth=1.2)+
-  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 
 #Position
 Balancedf$PosDev=with(Balancedf,ifelse(PositionDev<9,0,PositionDev-8))
-P2=ggplot(Balancedf,aes(x=factor(PosDev),y=Slope))+
+Balp2=Balancedf %>%
+  group_by(PosDev) %>%
+  mutate(mean_value = mean(Slope))
+
+P2=ggplot(Balp2,aes(x=factor(PosDev),y=Slope,fill = mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_jitter(size=0.6,width = 0.3,height = 0)+
   theme_classic()+
   ylab("Slope")+
   xlab("Deviation from C-Terminal Position")+
   scale_y_continuous(breaks = seq(-10,6,2))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   geom_vline(xintercept = 1.5,color="yellow2",linewidth=1.2)+  
-  theme(axis.text = element_text(size=14,color="black"),axis.title = element_text(size=16,color="black"))
+  theme(axis.text = element_text(size=14,color="black"),
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 
-P3=Balancedf%>%filter(AroCluster<7&AroCluster>1)%>%
-ggplot(aes(x=factor(AroCluster),y=Slope,fill=factor(Flanked)))+
+Balp3=Balancedf %>% 
+  filter(AroCluster<7&AroCluster>1) %>%
+  group_by(AroCluster,Flanked) %>%
+  mutate(mean_value = mean(Slope))
+
+P3=ggplot(Balp3,aes(x=factor(AroCluster),y=Slope,color=factor(Flanked),fill=mean_value))+
   geom_boxplot(position=position_dodge(width = 0.85),alpha=0.8,linewidth=1,outlier.color = NA)+
   geom_point(size=1.1,position = position_jitterdodge(jitter.width = 0.3,dodge.width = 0.85))+   
-  scale_fill_manual(name="Flanked?",values = c("red3","blue3"),labels = c("No","Yes"))+
+  scale_color_manual(name="Flanked by\nD residues",values = c("black","#279100"),labels = c("No","Yes"),)+
+  scale_linetype_manual(values=c(1,6))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0,guide = "none")+  
   theme_classic()+
   ylab("Slope")+
   xlab("Largest W Cluster")+
@@ -811,7 +866,8 @@ ggplot(aes(x=factor(AroCluster),y=Slope,fill=factor(Flanked)))+
         axis.title = element_text(size=16,color="black"),
         legend.text = element_text(size=10,color="black"),
         legend.title = element_text(size=12,color="black"), 
-        legend.position = c(0.12,0.15))
+        legend.position = c(0.13,0.15),
+        legend.key=element_blank())
 
 P=P1+P2+P3+plot_layout(widths = c(4,4,5))
 ggsave("Figures/RulesDeviation.png",P,width = 12,height = 5) 
@@ -861,9 +917,13 @@ Set32GsubsFdata=Set32varFdata[str_sub(Set32varFdata$set,1,6)=="some_G",c(1,2,3,4
 Set32GsubsFdata$Template=paste0(Set32GsubsFdata$Template,"-",Set32GsubsFdata$SubCount)
 
 #W and D substitutions
-P1=ggplot(Set32varFdata[Set32varFdata$set %in% ReorderSets[1:9],],aes(x=set,y=SlopeFinal200))+
+Set32varFdata=Set32varFdata %>%
+  group_by(set) %>%
+  mutate(mean_value = mean(SlopeFinal200))
+
+P1=ggplot(Set32varFdata[Set32varFdata$set %in% ReorderSets[1:9],],aes(x=set,y=SlopeFinal200,fill=mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+ 
+  geom_jitter(size=0.6,width = 0.3,height = 0)+ 
   theme_classic()+
   ylab("Slope")+
   xlab("")+
@@ -871,25 +931,29 @@ P1=ggplot(Set32varFdata[Set32varFdata$set %in% ReorderSets[1:9],],aes(x=set,y=Sl
   scale_x_discrete(limits=ReorderSets[c(1,6,2,7,3,8,4,9,5)],
                    labels=c("Set 1","D->E (half)","D->E (all)","W->F (half)","W->F (all)",
                             "W->L (half)","W->L (all)","W->Y (half)","W->Y (all)"))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+  
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
         axis.text = element_text(size=14,color="black"),
-        axis.title = element_text(size=16,color="black"))
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 
 #G substitutions
-P2=ggplot(Set32varFdata[Set32varFdata$set %in% ReorderSets[c(1,10:20)],],aes(x=fct_reorder(set,desc(SlopeFinal200)),y=SlopeFinal200))+
+P2=ggplot(Set32varFdata[Set32varFdata$set %in% ReorderSets[c(1,10:20)],],aes(x=fct_reorder(set,desc(SlopeFinal200)),y=SlopeFinal200,fill=mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+ 
+  geom_jitter(size=0.6,width = 0.3,height = 0)+ 
   theme_classic()+
   ylab("Slope")+
   xlab("")+
   scale_y_continuous(breaks = seq(-8,6,2),limits = c(-8,6))+
   scale_x_discrete(labels=c("G->L (half)","G->M (half)","G->V (half)","G->A (half)","Set 1","G->T (half)","G->P (half)",
                             "G->I (half)","G->Q (half)","G->C (half)","G->N (half)","G->S (half)"))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+  
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
         axis.text = element_text(size=14,color="black"),
-        axis.title = element_text(size=16,color="black"))
+        axis.title = element_text(size=16,color="black"),
+        legend.position = "none")
 
 ##Hydrophobics
 HydrophobicDF=Set32varFdata[Set32varFdata$set %in% c("some_G_to_I","some_G_to_V","some_G_to_L","some_G_to_M","some_G_to_A"),c(1,2,3,43)]
@@ -901,19 +965,26 @@ HydroNames=c(some_G_to_A="G->A (half)",
              some_G_to_V="G->V (half)")
 
 #Number of substitutions
-P3=ggplot(HydrophobicDF[HydrophobicDF$Count!=1 & HydrophobicDF$index!=7883,],aes(x=as.factor(Count),y=SlopeFinal200))+
+HydrophobicDF=HydrophobicDF[HydrophobicDF$Count!=1,] %>%
+  group_by(Count,set) %>%
+  mutate(mean_value = mean(SlopeFinal200))
+
+
+P3=ggplot(HydrophobicDF[HydrophobicDF$index!=7883,],aes(x=as.factor(Count),y=SlopeFinal200,fill = mean_value))+
   geom_boxplot(alpha=0.8,linewidth=1,outlier.color = NA)+
-  geom_jitter(size=1.1,width = 0.3,height = 0)+
+  geom_jitter(size=0.6,width = 0.3,height = 0)+
   geom_point(size=2,aes(x=as.factor(Count),y=SlopeFinal200),data = HydrophobicDF[HydrophobicDF$index==7883,])+
   facet_wrap(~set,nrow = 1,labeller = as_labeller(HydroNames))+  
   theme_classic()+
   ylab("Slope")+
   xlab("Number of Substitutions")+
   scale_y_continuous(breaks = seq(-8,6,2),limits = c(-8,6))+
+  scale_fill_gradient2(name="Mean Slope",low="navy",mid="white",high="red2",midpoint=0)+    
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   theme(axis.text = element_text(size=14,color="black"),
         axis.title = element_text(size=16,color="black"),
-        strip.text = element_text(size=14,color="black"))
+        strip.text = element_text(size=14,color="black"),
+        legend.position = "none")
 
 #Clustering
 NeighborRatio=c()
@@ -932,9 +1003,9 @@ for (Seq in HydrophobicDF$aa_seq) {
 }
 HydrophobicDF$RuleCluster=NeighborRatio
 
-P4=ggplot(HydrophobicDF,aes(x=RuleCluster,y=SlopeFinal200,color = set))+
-  geom_jitter(size=3,width = 0.005,height = 0)+
-  geom_smooth(linewidth=2,method = "lm",se = FALSE)+
+P4=ggplot(HydrophobicDF)+
+  geom_smooth(aes(x=RuleCluster,y=SlopeFinal200,color = set),linewidth=2,method = "lm",se = FALSE)+  
+  geom_jitter(aes(x=RuleCluster,y=SlopeFinal200,shape = set,fill = set),size=3,width = 0.005,height = 0)+
   theme_classic()+
   ylab("Slope")+
   xlab("Cluster Score")+
@@ -942,6 +1013,12 @@ P4=ggplot(HydrophobicDF,aes(x=RuleCluster,y=SlopeFinal200,color = set))+
   scale_color_manual(name="Substitution\n(Pearson r)",values = c("#780116","#F7B538","#DB7C26","#D8572A","#C32F27"),
                      labels = c("A (-0.25)","I (-0.41)","L (-0.32)","M (-0.27)","V (-0.35)"),
                      breaks = c("some_G_to_A","some_G_to_I","some_G_to_L","some_G_to_M","some_G_to_V"))+
+  scale_fill_manual(name="Substitution\n(Pearson r)",values = c("#780116","#F7B538","#DB7C26","#D8572A","#C32F27"),
+                     labels = c("A (-0.25)","I (-0.41)","L (-0.32)","M (-0.27)","V (-0.35)"),
+                     breaks = c("some_G_to_A","some_G_to_I","some_G_to_L","some_G_to_M","some_G_to_V"))+
+  scale_shape_manual(name="Substitution\n(Pearson r)",values = c(21:25),
+                     labels = c("A (-0.25)","I (-0.41)","L (-0.32)","M (-0.27)","V (-0.35)"),
+                     breaks = c("some_G_to_A","some_G_to_I","some_G_to_L","some_G_to_M","some_G_to_V"))+    
   geom_hline(yintercept = 0,color="red",linewidth=1.2)+
   theme(legend.position = c(0.12,0.25),
         axis.text = element_text(size=14,color="black"),
